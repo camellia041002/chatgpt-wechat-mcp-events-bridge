@@ -33,6 +33,11 @@ function fixture(options = {}) {
     channelId: "second-wechat",
     now: options.now || (() => new Date("2026-10-27T00:00:00.000Z")),
     chunkDelayMs: 0,
+    mediaFetchFn: options.mediaFetchFn || fetch,
+    serialEventDispatchEnabled: options.serialEventDispatchEnabled ?? true,
+    eventAckTimeoutMs: options.eventAckTimeoutMs ?? 0,
+    eventSendTimeoutMs: options.eventSendTimeoutMs ?? 1_000,
+    eventRetryDelaysMs: options.eventRetryDelaysMs ?? [0],
   });
   return { stateDir, store, transport, ilinkClient, sent, cleanup: () => fs.rmSync(stateDir, { recursive: true, force: true }) };
 }
@@ -54,6 +59,15 @@ function value(result) {
   return result.structuredContent;
 }
 
+async function waitUntil(predicate, { timeoutMs = 1_000, intervalMs = 5 } = {}) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (predicate()) return;
+    await new Promise((resolve) => setTimeout(resolve, intervalMs));
+  }
+  assert.fail("condition was not met before timeout");
+}
+
 test("discovery exposes the real event and only bounded transport tools", async (t) => {
   const f = fixture();
   t.after(f.cleanup);
@@ -61,10 +75,11 @@ test("discovery exposes the real event and only bounded transport tools", async 
   const events = await app.handleRpc("events/list", {}, { scopes: ["wechat:read"] });
   const tools = await app.handleRpc("tools/list", {}, { scopes: ["wechat:read"] });
   assert.deepEqual(events.events.map((item) => item.name), ["wechat.message.received"]);
-  assert.deepEqual(tools.tools.map((item) => item.name), ["get_transport_status", "get_pending_wechat_messages", "send_wechat_reply"]);
+  assert.deepEqual(tools.tools.map((item) => item.name), ["get_transport_status", "get_pending_wechat_messages", "get_wechat_image", "send_wechat_reply"]);
   assert.equal(tools.tools[1].annotations.readOnlyHint, true);
-  assert.equal(tools.tools[2].annotations.destructiveHint, true);
-  assert.equal(tools.tools[2].annotations.idempotentHint, true);
+  assert.equal(tools.tools[2].annotations.readOnlyHint, true);
+  assert.equal(tools.tools[3].annotations.destructiveHint, true);
+  assert.equal(tools.tools[3].annotations.idempotentHint, true);
 });
 
 test("iLink QR login uses the current POST contract and supports redirect verification", async () => {
@@ -173,6 +188,129 @@ test("sender filters are applied before webhook delivery", async (t) => {
   assert.equal(applicationDeliveries, 0);
 });
 
+test("managed event dispatch waits for a successful write before delivering the next event", async (t) => {
+  const f = fixture({ eventAckTimeoutMs: 500, eventRetryDelaysMs: [0] });
+  t.after(f.cleanup);
+  const delivered = [];
+  f.transport.setEventHandler(async (event) => {
+    delivered.push(event.eventId);
+    return [{ accepted: true, status: 200 }];
+  });
+
+  const first = await f.transport.acceptRawMessage(inbound(), { accountId: "simulation-account" });
+  const second = await f.transport.acceptRawMessage(inbound({
+    message_id: "message-2",
+    client_id: "client-2",
+    create_time_ms: Date.parse("2026-10-27T00:00:01.000Z"),
+    item_list: [{ type: 1, text_item: { text: "第二条" } }],
+  }), { accountId: "simulation-account" });
+
+  assert.deepEqual(delivered, [first.eventId]);
+  await f.transport.sendReply({
+    eventId: first.eventId,
+    toUserId: "wx-user-1",
+    text: "第一条回复",
+    idempotencyKey: `reply:${first.eventId}`,
+  });
+  await waitUntil(() => delivered.length === 2);
+  assert.deepEqual(delivered, [first.eventId, second.eventId]);
+  await f.transport.sendReply({
+    eventId: second.eventId,
+    toUserId: "wx-user-1",
+    text: "第二条回复",
+    idempotencyKey: `reply:${second.eventId}`,
+  });
+  await waitUntil(() => f.store.state.inboundEvents.find((item) => item.eventId === second.eventId)?.internal?.dispatch?.state === "acknowledged");
+});
+
+test("missing write acknowledgement redelivers the same event with a distinct webhook id", async (t) => {
+  const f = fixture({ eventAckTimeoutMs: 20, eventRetryDelaysMs: [0, 0] });
+  t.after(f.cleanup);
+  const deliveries = [];
+  f.transport.setEventHandler(async (event, options) => {
+    deliveries.push({ eventId: event.eventId, webhookId: options.webhookId });
+    if (deliveries.length === 2) {
+      await f.transport.sendReply({
+        eventId: event.eventId,
+        toUserId: "wx-user-1",
+        text: "受控重投后的回复",
+        idempotencyKey: `reply:${event.eventId}`,
+      });
+    }
+    return [{ accepted: true, status: 200 }];
+  });
+
+  const event = await f.transport.acceptRawMessage(inbound(), { accountId: "simulation-account" });
+  await waitUntil(() => deliveries.length === 2);
+  assert.deepEqual(deliveries.map((item) => item.eventId), [event.eventId, event.eventId]);
+  assert.equal(deliveries[0].webhookId, event.eventId);
+  assert.equal(deliveries[1].webhookId, `${event.eventId}.retry.2`);
+  await waitUntil(() => f.store.state.inboundEvents.find((item) => item.eventId === event.eventId)?.internal?.dispatch?.state === "acknowledged");
+  assert.equal(f.store.state.writeReceipts.filter((item) => item.status === "succeeded").length, 1);
+});
+
+test("dispatcher resume never replays legacy pending events", async (t) => {
+  const f = fixture({ serialEventDispatchEnabled: false });
+  t.after(f.cleanup);
+  await f.transport.acceptRawMessage(inbound(), { accountId: "simulation-account" });
+  const reopenedStore = new StateStore({ stateDir: f.stateDir });
+  const reopened = new WeChatTransport({
+    store: reopenedStore,
+    ilinkClient: f.ilinkClient,
+    mode: "simulation",
+    channelId: "second-wechat",
+    eventAckTimeoutMs: 0,
+    eventRetryDelaysMs: [0],
+  });
+  let deliveries = 0;
+  reopened.setEventHandler(async () => {
+    deliveries += 1;
+    return [{ accepted: true, status: 200 }];
+  });
+  reopened.resumeEventDispatch();
+  await new Promise((resolve) => setTimeout(resolve, 25));
+  assert.equal(deliveries, 0);
+  assert.equal(reopenedStore.state.inboundEvents[0].internal?.dispatch, undefined);
+});
+
+test("image messages emit bounded metadata and are readable through the image tool", async (t) => {
+  const png = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=", "base64");
+  const f = fixture({
+    mediaFetchFn: async () => new Response(png, { status: 200, headers: { "Content-Type": "image/png" } }),
+  });
+  t.after(f.cleanup);
+  const app = createMcpApp({ store: f.store, transport: f.transport });
+  const event = await f.transport.acceptRawMessage(inbound({
+    message_id: "image-message-1",
+    client_id: "image-client-1",
+    item_list: [{
+      type: 2,
+      image_item: {
+        media: {
+          url: "https://example.qpic.cn/path/image",
+          encrypt_type: 0,
+        },
+      },
+    }],
+  }), { accountId: "simulation-account" });
+
+  assert.equal(event.data.text, "[图片]");
+  assert.equal(event.data.message_type, "image");
+  assert.equal(event.data.image_count, 1);
+  assert.equal(event.data.image_error_count, 0);
+  assert.equal("images" in event.data, false);
+
+  const result = await app.handleRpc("tools/call", {
+    name: "get_wechat_image",
+    arguments: { event_id: event.eventId, image_index: 0 },
+  }, { scopes: ["wechat:read"] });
+  assert.equal(result.structuredContent.event_id, event.eventId);
+  assert.equal(result.structuredContent.mime_type, "image/png");
+  assert.equal(result.content[1].type, "image");
+  assert.equal(result.content[1].mimeType, "image/png");
+  assert.deepEqual(Buffer.from(result.content[1].data, "base64"), png);
+});
+
 test("simulation reply is idempotent and destination-bound", async (t) => {
   const f = fixture();
   t.after(f.cleanup);
@@ -209,6 +347,9 @@ test("scheduled polling tool returns oldest pending messages and removes them on
     sender_id: "wx-user-1",
     conversation_id: "wx-user-1",
     text: "你好",
+    message_type: "text",
+    image_count: 0,
+    image_error_count: 0,
     received_at: "2026-10-27T00:00:00.000Z",
   });
   assert.equal("context_token" in pending.messages[0], false);
@@ -379,7 +520,7 @@ test("OAuth DCR, explicit consent, PKCE, token exchange, and authenticated MCP c
     method: "POST", headers: { "Content-Type": "application/json", Authorization: `Bearer ${token.access_token}` },
     body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list", params: {} }),
   })).json();
-  assert.deepEqual(rpc.result.tools.map((item) => item.name), ["get_transport_status", "get_pending_wechat_messages", "send_wechat_reply"]);
+  assert.deepEqual(rpc.result.tools.map((item) => item.name), ["get_transport_status", "get_pending_wechat_messages", "get_wechat_image", "send_wechat_reply"]);
   const reopened = new StateStore({ stateDir: f.stateDir });
   assert.equal(Object.keys(reopened.state.oauth.accessTokens).length, 1);
 });

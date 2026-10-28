@@ -1,10 +1,19 @@
 import { canonicalJson, normalizeAccountId, requireText, sha256, sleep } from "./util.mjs";
+import {
+  DEFAULT_CDN_BASE_URL,
+  extractInboundImageRefs,
+  persistInboundImages,
+  readStoredImage,
+} from "./media-store.mjs";
 
 const EVENT_NAME = "wechat.message.received";
 const MAX_REPLY_CHARS = 24_000;
 const MAX_WEIXIN_CHUNK = 3_800;
 const WEIXIN_MAX_DELIVERY_MESSAGES = 9;
 const DEFAULT_CHUNK_DELAY_MS = 900;
+const DEFAULT_EVENT_ACK_TIMEOUT_MS = 75_000;
+const DEFAULT_EVENT_SEND_TIMEOUT_MS = 300_000;
+const DEFAULT_EVENT_RETRY_DELAYS_MS = [0, 5_000, 15_000];
 
 export class WeChatTransport {
   constructor({
@@ -18,6 +27,12 @@ export class WeChatTransport {
     chunkDelayMs = DEFAULT_CHUNK_DELAY_MS,
     random = Math.random,
     pollingEnabled = false,
+    mediaCdnBaseUrl = DEFAULT_CDN_BASE_URL,
+    mediaFetchFn = fetch,
+    serialEventDispatchEnabled = true,
+    eventAckTimeoutMs = DEFAULT_EVENT_ACK_TIMEOUT_MS,
+    eventSendTimeoutMs = DEFAULT_EVENT_SEND_TIMEOUT_MS,
+    eventRetryDelaysMs = DEFAULT_EVENT_RETRY_DELAYS_MS,
   }) {
     this.store = store;
     this.ilinkClient = ilinkClient;
@@ -29,7 +44,14 @@ export class WeChatTransport {
     this.chunkDelayMs = chunkDelayMs;
     this.random = random;
     this.pollingEnabled = Boolean(pollingEnabled);
+    this.mediaCdnBaseUrl = String(mediaCdnBaseUrl || DEFAULT_CDN_BASE_URL);
+    this.mediaFetchFn = mediaFetchFn;
+    this.serialEventDispatchEnabled = Boolean(serialEventDispatchEnabled);
+    this.eventAckTimeoutMs = boundedDuration(eventAckTimeoutMs, DEFAULT_EVENT_ACK_TIMEOUT_MS, 0, 10 * 60_000);
+    this.eventSendTimeoutMs = boundedDuration(eventSendTimeoutMs, DEFAULT_EVENT_SEND_TIMEOUT_MS, 1_000, 30 * 60_000);
+    this.eventRetryDelaysMs = normalizeRetryDelays(eventRetryDelaysMs);
     this.inFlightWrites = new Map();
+    this.eventDispatchPromise = null;
   }
 
   status() {
@@ -45,6 +67,9 @@ export class WeChatTransport {
       inboundEventCount: state.inboundEvents.length,
       pendingMessageCount: this.pendingMessages({ limit: 10_000 }).count,
       successfulWriteCount: state.writeReceipts.filter((item) => item.status === "succeeded").length,
+      serialEventDispatchEnabled: this.serialEventDispatchEnabled,
+      managedEventQueueDepth: state.inboundEvents.filter((event) => isManagedUnacknowledged(event, state.writeReceipts)).length,
+      managedEventStalledCount: state.inboundEvents.filter((event) => ["failed", "exhausted", "unroutable"].includes(event.internal?.dispatch?.state)).length,
       latestInboundEvent: redactInbound(state.inboundEvents.at(-1)),
       latestWrite: redactReceipt(state.writeReceipts.at(-1)),
     };
@@ -53,6 +78,12 @@ export class WeChatTransport {
   setEventHandler(handler) {
     if (typeof handler !== "function") throw new Error("event handler must be a function");
     this.onEvent = handler;
+  }
+
+  resumeEventDispatch() {
+    if (!this.serialEventDispatchEnabled) return false;
+    this.#ensureEventDispatcher();
+    return true;
   }
 
   async start() {
@@ -103,6 +134,17 @@ export class WeChatTransport {
       this.store.rememberContextToken(normalized.accountId, normalized.senderId, normalized.contextToken);
     }
 
+    const media = normalized.imageRefs.length
+      ? await persistInboundImages({
+          imageRefs: normalized.imageRefs,
+          stateDir: this.store.stateDir,
+          eventId: normalized.eventId,
+          receivedAt: normalized.receivedAt,
+          cdnBaseUrl: this.mediaCdnBaseUrl,
+          fetchFn: this.mediaFetchFn,
+        })
+      : { images: [], errors: [] };
+
     const event = {
       eventId: normalized.eventId,
       name: EVENT_NAME,
@@ -113,6 +155,9 @@ export class WeChatTransport {
         conversation_id: normalized.conversationId,
         message_id: normalized.messageId,
         text: normalized.text,
+        message_type: normalized.messageType,
+        image_count: media.images.length,
+        image_error_count: media.errors.length,
         received_at: normalized.receivedAt,
       },
       cursor: null,
@@ -120,12 +165,28 @@ export class WeChatTransport {
         accountId: normalized.accountId,
         senderId: normalized.senderId,
         dedupKey: normalized.dedupKey,
+        images: media.images,
+        imageErrors: media.errors,
+        ...(this.serialEventDispatchEnabled ? {
+          dispatch: {
+            managed: true,
+            state: "queued",
+            attempts: 0,
+            queuedAt: this.now().toISOString(),
+          },
+        } : {}),
       },
     };
     this.store.state.inboundEvents.push(event);
     this.store.state.processedMessages[normalized.dedupKey] = event.eventId;
     this.store.save();
-    await this.onEvent(publicEvent(event));
+    if (this.serialEventDispatchEnabled) {
+      const wasIdle = !this.eventDispatchPromise;
+      this.#ensureEventDispatcher();
+      if (wasIdle) await this.#waitForInitialDelivery(event);
+    } else {
+      await this.onEvent(publicEvent(event));
+    }
     return publicEvent(event);
   }
 
@@ -160,8 +221,33 @@ export class WeChatTransport {
         senderId: event.data.sender_id,
         conversationId: event.data.conversation_id,
         text: event.data.text,
+        messageType: event.data.message_type || "text",
+        imageCount: Number(event.data.image_count) || 0,
+        imageErrorCount: Number(event.data.image_error_count) || 0,
         receivedAt: event.data.received_at,
       })),
+    };
+  }
+
+  async getImage({ eventId, imageIndex = 0 }) {
+    const normalizedEventId = requireText(eventId, "event_id", 200);
+    const normalizedIndex = Number(imageIndex);
+    if (!Number.isInteger(normalizedIndex) || normalizedIndex < 0 || normalizedIndex > 3) {
+      throw new Error("image_index must be an integer from 0 to 3");
+    }
+    const event = this.store.state.inboundEvents.find((item) => item.eventId === normalizedEventId);
+    if (!event) throw new Error("event_id is not a known inbound WeChat event");
+    const image = event.internal?.images?.[normalizedIndex];
+    if (!image) throw new Error("image_index is not available for this event");
+    const stored = await readStoredImage({ stateDir: this.store.stateDir, relativePath: image.relativePath });
+    if (stored.sha256 !== image.sha256) throw new Error("stored image integrity check failed");
+    return {
+      eventId: normalizedEventId,
+      imageIndex: normalizedIndex,
+      mimeType: stored.mimeType,
+      sizeBytes: stored.sizeBytes,
+      sha256: stored.sha256,
+      data: stored.bytes.toString("base64"),
     };
   }
 
@@ -175,8 +261,12 @@ export class WeChatTransport {
     if (event.internal?.senderId !== normalizedUserId) {
       throw new Error("to_user_id must match the sender bound to event_id");
     }
+    if (normalizedKey !== `reply:${normalizedEventId}`) {
+      throw new Error("idempotency_key must equal reply:<event_id>");
+    }
     const existing = this.store.state.writeReceipts.find((item) => item.idempotencyKey === normalizedKey);
     if (existing?.status === "succeeded") {
+      this.#markEventAcknowledged(event, existing.completedAt || this.now().toISOString());
       return { duplicate: true, ...redactReceipt(existing), externalSideEffects: this.mode === "real" ? existing.chunkCount : 0 };
     }
     if (existing && existing.eventId !== normalizedEventId) {
@@ -255,6 +345,7 @@ export class WeChatTransport {
       receipt.status = "succeeded";
       receipt.completedAt = this.now().toISOString();
       receipt.errorCode = "";
+      this.#markEventAcknowledged(event, receipt.completedAt, false);
       this.store.save();
       return {
         duplicate: false,
@@ -280,6 +371,193 @@ export class WeChatTransport {
     if (!account) throw new Error("The configured iLink account is not logged in");
     return account;
   }
+
+  #ensureEventDispatcher() {
+    if (this.eventDispatchPromise || !this.serialEventDispatchEnabled) return this.eventDispatchPromise;
+    this.eventDispatchPromise = this.#runEventDispatcher()
+      .catch((error) => {
+        const event = this.#nextManagedEvent();
+        if (!event) return;
+        event.internal.dispatch.state = "exhausted";
+        event.internal.dispatch.lastError = String(error?.name || "dispatcher_error");
+        event.internal.dispatch.exhaustedAt = this.now().toISOString();
+        this.store.save();
+      })
+      .finally(() => {
+        this.eventDispatchPromise = null;
+        if (this.#nextManagedEvent()) this.#ensureEventDispatcher();
+      });
+    return this.eventDispatchPromise;
+  }
+
+  async #runEventDispatcher() {
+    while (true) {
+      const event = this.#nextManagedEvent();
+      if (!event) return;
+      await this.#dispatchManagedEvent(event);
+    }
+  }
+
+  #nextManagedEvent() {
+    return this.store.state.inboundEvents.find((event) => {
+      const dispatch = event.internal?.dispatch;
+      if (dispatch?.managed !== true) return false;
+      if (["acknowledged", "failed", "exhausted", "unroutable"].includes(dispatch.state)) return false;
+      return !hasSucceededWrite(this.store.state.writeReceipts, event.eventId);
+    }) || null;
+  }
+
+  async #dispatchManagedEvent(event) {
+    const dispatch = event.internal.dispatch;
+    const existingReceipt = latestWriteReceipt(this.store.state.writeReceipts, event.eventId);
+    if (existingReceipt?.status === "succeeded") {
+      this.#markEventAcknowledged(event, existingReceipt.completedAt || this.now().toISOString());
+      this.store.save();
+      return;
+    }
+    if (existingReceipt?.status === "failed") {
+      dispatch.state = "failed";
+      dispatch.failedAt = existingReceipt.failedAt || this.now().toISOString();
+      this.store.save();
+      return;
+    }
+
+    for (let attemptIndex = Number(dispatch.attempts) || 0; attemptIndex < this.eventRetryDelaysMs.length; attemptIndex += 1) {
+      const delayMs = this.eventRetryDelaysMs[attemptIndex];
+      if (delayMs > 0) {
+        dispatch.state = "retry_wait";
+        dispatch.nextAttemptAt = new Date(Date.now() + delayMs).toISOString();
+        this.store.save();
+        await sleep(delayMs);
+      }
+
+      const beforeAttempt = latestWriteReceipt(this.store.state.writeReceipts, event.eventId);
+      if (beforeAttempt?.status === "succeeded") {
+        this.#markEventAcknowledged(event, beforeAttempt.completedAt || this.now().toISOString());
+        this.store.save();
+        return;
+      }
+      if (beforeAttempt?.status === "failed") {
+        dispatch.state = "failed";
+        dispatch.failedAt = beforeAttempt.failedAt || this.now().toISOString();
+        this.store.save();
+        return;
+      }
+
+      const attempt = attemptIndex + 1;
+      const webhookId = attempt === 1 ? event.eventId : `${event.eventId}.retry.${attempt}`;
+      dispatch.state = "delivering";
+      dispatch.attempts = attempt;
+      dispatch.lastWebhookId = webhookId;
+      dispatch.lastAttemptAt = this.now().toISOString();
+      delete dispatch.nextAttemptAt;
+      this.store.save();
+
+      let results;
+      try {
+        results = await this.onEvent(publicEvent(event), { webhookId });
+      } catch (error) {
+        dispatch.lastError = String(error?.name || "event_delivery_error");
+        this.store.save();
+        continue;
+      }
+      const accepted = !Array.isArray(results) || results.some((result) => result?.accepted === true);
+      if (Array.isArray(results) && results.length === 0) {
+        dispatch.state = "unroutable";
+        dispatch.lastError = "no_matching_subscription";
+        this.store.save();
+        return;
+      }
+      if (!accepted) {
+        dispatch.lastError = "webhook_not_accepted";
+        this.store.save();
+        continue;
+      }
+
+      dispatch.state = "awaiting_reply";
+      dispatch.acceptedAt = this.now().toISOString();
+      dispatch.lastError = "";
+      this.store.save();
+      const outcome = await this.#waitForWriteOutcome(event.eventId);
+      if (outcome === "succeeded") {
+        const receipt = latestWriteReceipt(this.store.state.writeReceipts, event.eventId);
+        this.#markEventAcknowledged(event, receipt?.completedAt || this.now().toISOString());
+        this.store.save();
+        return;
+      }
+      if (outcome === "failed") {
+        dispatch.state = "failed";
+        dispatch.failedAt = this.now().toISOString();
+        this.store.save();
+        return;
+      }
+      dispatch.state = "timed_out";
+      dispatch.lastError = "reply_ack_timeout";
+      this.store.save();
+    }
+
+    dispatch.state = "exhausted";
+    dispatch.exhaustedAt = this.now().toISOString();
+    this.store.save();
+  }
+
+  async #waitForWriteOutcome(eventId) {
+    const ackDeadline = Date.now() + this.eventAckTimeoutMs;
+    let sendDeadline = null;
+    while (true) {
+      const receipt = latestWriteReceipt(this.store.state.writeReceipts, eventId);
+      if (receipt?.status === "succeeded") return "succeeded";
+      if (receipt?.status === "failed") return "failed";
+      if (receipt?.status === "pending" && sendDeadline === null) {
+        sendDeadline = Date.now() + this.eventSendTimeoutMs;
+      }
+      const deadline = sendDeadline ?? ackDeadline;
+      if (Date.now() >= deadline) return "timeout";
+      await sleep(Math.min(250, Math.max(5, deadline - Date.now())));
+    }
+  }
+
+  async #waitForInitialDelivery(event) {
+    const deadline = Date.now() + 10_000;
+    while (["queued", "delivering"].includes(event.internal?.dispatch?.state) && Date.now() < deadline) {
+      await sleep(5);
+    }
+  }
+
+  #markEventAcknowledged(event, timestamp, save = true) {
+    const dispatch = event?.internal?.dispatch;
+    if (dispatch?.managed !== true) return false;
+    dispatch.state = "acknowledged";
+    dispatch.acknowledgedAt = timestamp;
+    dispatch.lastError = "";
+    if (save) this.store.save();
+    return true;
+  }
+}
+
+function hasSucceededWrite(receipts, eventId) {
+  return receipts.some((item) => item.eventId === eventId && item.status === "succeeded");
+}
+
+function latestWriteReceipt(receipts, eventId) {
+  return [...receipts].reverse().find((item) => item.eventId === eventId) || null;
+}
+
+function isManagedUnacknowledged(event, receipts) {
+  return event.internal?.dispatch?.managed === true
+    && event.internal.dispatch.state !== "acknowledged"
+    && !hasSucceededWrite(receipts, event.eventId);
+}
+
+function boundedDuration(value, fallback, minimum, maximum) {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) return fallback;
+  return Math.min(Math.max(Math.trunc(parsed), minimum), maximum);
+}
+
+function normalizeRetryDelays(values) {
+  const source = Array.isArray(values) && values.length ? values : DEFAULT_EVENT_RETRY_DELAYS_MS;
+  return source.slice(0, 5).map((value) => boundedDuration(value, 0, 0, 10 * 60_000));
 }
 
 export function normalizeInboundMessage(message, { accountId, channelId, now = () => new Date() }) {
@@ -288,7 +566,9 @@ export function normalizeInboundMessage(message, { accountId, channelId, now = (
   if (messageType === 2 || (messageType !== 0 && messageType !== 1)) return null;
   const senderId = String(message.from_user_id ?? "").trim();
   if (!senderId) return null;
-  const text = inboundText(message.item_list);
+  const imageRefs = extractInboundImageRefs(message.item_list);
+  const inboundBody = inboundText(message.item_list);
+  const text = inboundBody || (imageRefs.length ? "[图片]" : "");
   if (!text) return null;
   const createdAtMs = positiveNumber(message.create_time_ms) || positiveNumber(message.create_time) * 1000 || now().getTime();
   const messageId = String(message.message_id ?? message.client_id ?? "").trim();
@@ -301,6 +581,7 @@ export function normalizeInboundMessage(message, { accountId, channelId, now = (
     clientId: String(message.client_id ?? "").trim(),
     createdAtMs,
     textHash: sha256(text),
+    imageCount: imageRefs.length,
   };
   const dedupKey = sha256(canonicalJson(dedupIdentity));
   return {
@@ -310,6 +591,8 @@ export function normalizeInboundMessage(message, { accountId, channelId, now = (
     conversationId,
     messageId,
     text,
+    messageType: imageRefs.length ? (inboundBody ? "mixed" : "image") : "text",
+    imageRefs,
     contextToken: String(message.context_token ?? "").trim(),
     receivedAt: new Date(createdAtMs).toISOString(),
     dedupKey,

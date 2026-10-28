@@ -366,6 +366,12 @@ export function createRuntime(options = {}) {
     channelId: options.channelId ?? process.env.TRANSPORT_CHANNEL_ID ?? "second-wechat",
     mode: options.mode ?? process.env.TRANSPORT_MODE ?? "simulation",
     pollingEnabled: options.pollingEnabled ?? process.env.TRANSPORT_POLLING_ENABLED === "true",
+    mediaCdnBaseUrl: options.mediaCdnBaseUrl ?? process.env.TRANSPORT_WEIXIN_CDN_BASE_URL,
+    mediaFetchFn: options.mediaFetchFn ?? fetch,
+    serialEventDispatchEnabled: options.serialEventDispatchEnabled ?? process.env.TRANSPORT_SERIAL_EVENT_DISPATCH_ENABLED !== "false",
+    eventAckTimeoutMs: options.eventAckTimeoutMs ?? Number(process.env.TRANSPORT_EVENT_ACK_TIMEOUT_MS || 75_000),
+    eventSendTimeoutMs: options.eventSendTimeoutMs ?? Number(process.env.TRANSPORT_EVENT_SEND_TIMEOUT_MS || 300_000),
+    eventRetryDelaysMs: options.eventRetryDelaysMs,
   });
   const app = createMcpApp({ store, transport, ...(options.mcpOptions || {}) });
   transport.setEventHandler(app.deliverEvent);
@@ -389,6 +395,7 @@ async function runMain() {
   });
   await new Promise((resolve) => server.listen(port, host, resolve));
   console.error(`wechat-work-ilink-transport listening on http://${host}:${port}/<redacted>/mcp`);
+  runtime.transport.resumeEventDispatch();
 
   let stopping = false;
   const pollingEnabled = process.env.TRANSPORT_POLLING_ENABLED === "true";

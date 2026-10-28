@@ -16,7 +16,7 @@
     "start": "node src/server.mjs",
     "login": "node src/cli.mjs login",
     "status": "node src/cli.mjs status",
-    "check": "node --check src/server.mjs && node --check src/mcp-app.mjs && node --check src/transport.mjs && node --check src/ilink-client.mjs && node --test test/*.test.mjs",
+    "check": "node --check src/server.mjs && node --check src/mcp-app.mjs && node --check src/transport.mjs && node --check src/media-store.mjs && node --check src/ilink-client.mjs && node --test test/*.test.mjs",
     "test": "node --test test/*.test.mjs"
   },
   "dependencies": {

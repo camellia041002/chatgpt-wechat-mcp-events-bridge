@@ -1,7 +1,7 @@
 {
   "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
   "name": "wechat-work-bridge",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Isolated no-model bridge between a dedicated WeChat account and one ChatGPT Work reply automation.",
   "license": "AGPL-3.0-only",
   "author": {
@@ -17,7 +17,7 @@
       "interface": {
         "displayName": "WeChat Work Bridge",
         "shortDescription": "第二微信号与 Work 对话桥接",
-        "longDescription": "No-model transport for one dedicated WeChat account. It emits new-message events, exposes a redacted pending-message queue, and provides an idempotent reply tool bound to the originating sender.",
+        "longDescription": "No-model transport for one dedicated WeChat account. It emits text and image events, exposes read-only pending-message and image tools, serializes delivery until a reply receipt exists, and provides an idempotent reply tool bound to the originating sender.",
         "developerName": "camellia041002",
         "category": "Communication",
         "capabilities": [],
