@@ -1,0 +1,14 @@
+node_modules/
+runtime/
+.env
+.env.*
+!.env.example
+*.log
+coverage/
+.DS_Store
+Thumbs.db
+*.tmp
+*.png
+*.jpg
+*.jpeg
+*.webp

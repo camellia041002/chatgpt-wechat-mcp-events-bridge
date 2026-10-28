@@ -1,0 +1,28 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "wechat-work-bridge",
+  "version": "0.2.0",
+  "description": "Isolated no-model bridge between a dedicated WeChat account and one ChatGPT Work reply automation.",
+  "license": "AGPL-3.0-only",
+  "author": {
+    "name": "camellia041002"
+  },
+  "keywords": [
+    "wechat",
+    "mcp-events",
+    "transport"
+  ],
+  "extensions": {
+    "com.openai": {
+      "interface": {
+        "displayName": "WeChat Work Bridge",
+        "shortDescription": "第二微信号与 Work 对话桥接",
+        "longDescription": "No-model transport for one dedicated WeChat account. It emits new-message events, exposes a redacted pending-message queue, and provides an idempotent reply tool bound to the originating sender.",
+        "developerName": "camellia041002",
+        "category": "Communication",
+        "capabilities": [],
+        "defaultPrompt": "把此自动化作为第二微信号唯一回复执行者，处理新消息并使用事件绑定的幂等工具发送一次回复。"
+      }
+    }
+  }
+}

@@ -1,0 +1,26 @@
+{
+  "name": "wechat-work-ilink-transport",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "No-model iLink transport between a dedicated WeChat account and ChatGPT Work MCP Events.",
+  "license": "AGPL-3.0-only",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/camellia041002/chatgpt-wechat-mcp-events-bridge.git"
+  },
+  "engines": {
+    "node": ">=22.13.0"
+  },
+  "scripts": {
+    "start": "node src/server.mjs",
+    "login": "node src/cli.mjs login",
+    "status": "node src/cli.mjs status",
+    "check": "node --check src/server.mjs && node --check src/mcp-app.mjs && node --check src/transport.mjs && node --check src/ilink-client.mjs && node --test test/*.test.mjs",
+    "test": "node --test test/*.test.mjs"
+  },
+  "dependencies": {
+    "qrcode": "1.5.4",
+    "standardwebhooks": "1.1.1"
+  }
+}

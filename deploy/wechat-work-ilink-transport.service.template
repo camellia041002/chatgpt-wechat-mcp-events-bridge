@@ -1,0 +1,23 @@
+[Unit]
+Description=Isolated WeChat Work iLink transport
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=wechat-work-transport
+Group=wechat-work-transport
+WorkingDirectory=/opt/wechat-work-ilink-transport
+EnvironmentFile=/etc/wechat-work-ilink-transport/environment
+ExecStart=/usr/bin/node /opt/wechat-work-ilink-transport/src/server.mjs
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/wechat-work-ilink-transport
+
+[Install]
+WantedBy=multi-user.target
+

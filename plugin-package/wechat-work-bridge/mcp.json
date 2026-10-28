@@ -1,0 +1,29 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/mcp.schema.json",
+  "mcpServers": {
+    "wechat-work-transport": {
+      "type": "streamable-http",
+      "url": "https://YOUR_PUBLIC_BASE/YOUR_ROUTE_TOKEN/mcp",
+      "extensions": {
+        "com.openai": {
+          "auth": {
+            "type": "oauth",
+            "client": {
+              "mode": "dcr"
+            },
+            "baseScopes": [
+              "wechat:read",
+              "wechat:reply"
+            ],
+            "defaultScopes": [
+              "wechat:read",
+              "wechat:reply"
+            ],
+            "oidcEnabled": false,
+            "oidcScopesSupported": []
+          }
+        }
+      }
+    }
+  }
+}
