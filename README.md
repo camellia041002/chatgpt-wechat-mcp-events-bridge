@@ -89,7 +89,7 @@ TRANSPORT_POLLING_ENABLED=true
 - 新订阅只接收订阅建立之后的新事件；创建订阅不会自动 replay 已有 pending。
 - 串行确认机制只管理启用该机制后新收到的事件，不会自动重放旧 pending。
 - pending 仅表示 transport 尚未记录成功回复，不代表 ChatGPT 会自动收到该事件。
-- ChatGPT 的事件自动化拥有自己的运行上下文；本项目不保证继承其他聊天的完整历史。
+- 订阅建在哪个 ChatGPT 窗口，事件就在那个窗口里处理，并延续那个窗口的上下文；我们的做法是直接在原来聊天的窗口里建订阅。
 - `send_wechat_reply` 成功与用户手机端实际看到消息是两个不同证据层级。
 
 ## License
