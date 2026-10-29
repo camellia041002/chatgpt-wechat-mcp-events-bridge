@@ -117,7 +117,7 @@ function renderConsent(response, url, store, base, allowedResourcePaths, allowed
     scope: params.scope,
     resource: params.resource,
   }).map(([key, value]) => `<input type="hidden" name="${html(key)}" value="${html(value)}">`).join("");
-  const body = `<!doctype html><html lang="en"><meta charset="utf-8"><title>Authorize WeChat Work Transport</title><style>body{font:16px system-ui;max-width:620px;margin:60px auto;padding:0 20px}button{font:inherit;padding:10px 18px}code{background:#eee;padding:2px 5px}</style><h1>Authorize isolated WeChat transport</h1><p><strong>${html(client.clientName)}</strong> requests <code>${html(params.scope)}</code>.</p><p>This connection can read second-WeChat events and send replies through the isolated transport. It does not access Cyberboss, Klein, Dwell, Garden, or memory.</p><form method="post">${fields}<button type="submit">Authorize</button></form></html>`;
+  const body = `<!doctype html><html lang="en"><meta charset="utf-8"><title>Authorize WeChat Work Transport</title><style>body{font:16px system-ui;max-width:620px;margin:60px auto;padding:0 20px}button{font:inherit;padding:10px 18px}code{background:#eee;padding:2px 5px}</style><h1>Authorize isolated WeChat transport</h1><p><strong>${html(client.clientName)}</strong> requests <code>${html(params.scope)}</code>.</p><p>This connection can read events from the authorized WeChat account and send replies through the isolated transport. It does not access other services or memory stores.</p><form method="post">${fields}<button type="submit">Authorize</button></form></html>`;
   response.writeHead(200, { "Content-Type": "text/html; charset=utf-8", "Content-Length": Buffer.byteLength(body), "Cache-Control": "no-store", "X-Frame-Options": "DENY" });
   response.end(body);
 }
@@ -363,7 +363,7 @@ export function createRuntime(options = {}) {
     store,
     ilinkClient,
     accountId: options.accountId ?? process.env.TRANSPORT_ACCOUNT_ID ?? "",
-    channelId: options.channelId ?? process.env.TRANSPORT_CHANNEL_ID ?? "second-wechat",
+    channelId: options.channelId ?? process.env.TRANSPORT_CHANNEL_ID ?? "wechat",
     mode: options.mode ?? process.env.TRANSPORT_MODE ?? "simulation",
     pollingEnabled: options.pollingEnabled ?? process.env.TRANSPORT_POLLING_ENABLED === "true",
     mediaCdnBaseUrl: options.mediaCdnBaseUrl ?? process.env.TRANSPORT_WEIXIN_CDN_BASE_URL,

@@ -20,7 +20,7 @@ export class WeChatTransport {
     store,
     ilinkClient,
     accountId = "",
-    channelId = "second-wechat",
+    channelId = "wechat",
     mode = "simulation",
     now = () => new Date(),
     onEvent = async () => {},

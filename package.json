@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "No-model iLink transport between a dedicated WeChat account and ChatGPT Work MCP Events.",
+  "description": "No-model iLink transport between a WeChat account authorized through ClawBot QR login and ChatGPT Work MCP Events.",
   "license": "AGPL-3.0-only",
   "repository": {
     "type": "git",

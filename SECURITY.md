@@ -9,7 +9,7 @@
 - `context_token` values, sender identifiers or message logs
 - exported `runtime/` state
 
-Run the service as a dedicated operating-system user, bind it to loopback, and expose it only through a separately authenticated HTTPS endpoint. Use a dedicated test/secondary account rather than a primary personal account.
+Run the service as a dedicated operating-system user, bind it to loopback, and expose it only through a separately authenticated HTTPS endpoint. Any WeChat account can authorize ClawBot, but a test or secondary account is recommended because the connected automation can send messages on that account's behalf.
 
 `send_wechat_reply` is deliberately bound to the sender recorded on the original inbound event. Do not remove destination binding or idempotency checks.
 

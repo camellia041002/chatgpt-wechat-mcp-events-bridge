@@ -30,7 +30,7 @@ function fixture(options = {}) {
     ilinkClient,
     accountId: options.accountId || "",
     mode: options.mode || "simulation",
-    channelId: "second-wechat",
+    channelId: options.channelId,
     now: options.now || (() => new Date("2026-10-27T00:00:00.000Z")),
     chunkDelayMs: 0,
     mediaFetchFn: options.mediaFetchFn || fetch,
@@ -71,6 +71,7 @@ async function waitUntil(predicate, { timeoutMs = 1_000, intervalMs = 5 } = {}) 
 test("discovery exposes the real event and only bounded transport tools", async (t) => {
   const f = fixture();
   t.after(f.cleanup);
+  assert.equal(f.transport.channelId, "wechat");
   const app = createMcpApp({ store: f.store, transport: f.transport });
   const events = await app.handleRpc("events/list", {}, { scopes: ["wechat:read"] });
   const tools = await app.handleRpc("tools/list", {}, { scopes: ["wechat:read"] });
@@ -155,7 +156,7 @@ test("signed inbound event reaches a matching subscription and preserves user te
   f.transport.setEventHandler(app.deliverEvent);
   await app.handleRpc("events/subscribe", {
     name: "wechat.message.received",
-    arguments: { channel_id: "second-wechat" },
+    arguments: { channel_id: "wechat" },
     delivery: { mode: "webhook", url: "https://events.example.test/callback", secret },
   }, { principal: "owner", scopes: ["wechat:read"] });
   const event = await f.transport.acceptRawMessage(inbound(), { accountId: "simulation-account" });
@@ -181,7 +182,7 @@ test("sender filters are applied before webhook delivery", async (t) => {
   f.transport.setEventHandler(app.deliverEvent);
   await app.handleRpc("events/subscribe", {
     name: "wechat.message.received",
-    arguments: { channel_id: "second-wechat", sender_id: "someone-else" },
+    arguments: { channel_id: "wechat", sender_id: "someone-else" },
     delivery: { mode: "webhook", url: "https://events.example.test/callback", secret },
   }, { principal: "owner", scopes: ["wechat:read"] });
   await f.transport.acceptRawMessage(inbound(), { accountId: "simulation-account" });
@@ -258,7 +259,7 @@ test("dispatcher resume never replays legacy pending events", async (t) => {
     store: reopenedStore,
     ilinkClient: f.ilinkClient,
     mode: "simulation",
-    channelId: "second-wechat",
+    channelId: "wechat",
     eventAckTimeoutMs: 0,
     eventRetryDelaysMs: [0],
   });
@@ -338,7 +339,7 @@ test("scheduled polling tool returns oldest pending messages and removes them on
 
   const pending = value(await app.handleRpc("tools/call", {
     name: "get_pending_wechat_messages",
-    arguments: { channel_id: "second-wechat", limit: 1 },
+    arguments: { channel_id: "wechat", limit: 1 },
   }, { scopes: ["wechat:read"] }));
   assert.equal(pending.pending_count, 2);
   assert.equal(pending.truncated, true);
@@ -448,7 +449,7 @@ test("message deduplication and context tokens survive a store restart", async (
   t.after(f.cleanup);
   const first = await f.transport.acceptRawMessage(inbound(), { accountId: "simulation-account" });
   const reopenedStore = new StateStore({ stateDir: f.stateDir });
-  const reopened = new WeChatTransport({ store: reopenedStore, ilinkClient: f.ilinkClient, mode: "simulation", channelId: "second-wechat" });
+  const reopened = new WeChatTransport({ store: reopenedStore, ilinkClient: f.ilinkClient, mode: "simulation", channelId: "wechat" });
   const duplicate = await reopened.acceptRawMessage(inbound(), { accountId: "simulation-account" });
   assert.ok(first);
   assert.equal(duplicate, null);
@@ -617,7 +618,7 @@ test("transient webhook failures retry with the same event id and a fresh signat
   const app = createMcpApp({ store: f.store, transport: f.transport, fetchFn, resolveHost: async () => [{ address: "8.8.8.8", family: 4 }], retryDelaysMs: [0, 0, 0] });
   f.transport.setEventHandler(app.deliverEvent);
   await app.handleRpc("events/subscribe", {
-    name: "wechat.message.received", arguments: { channel_id: "second-wechat" },
+    name: "wechat.message.received", arguments: { channel_id: "wechat" },
     delivery: { mode: "webhook", url: "https://events.example.test/callback", secret },
   }, { principal: "owner", scopes: ["wechat:read"] });
   const event = await f.transport.acceptRawMessage(inbound(), { accountId: "simulation-account" });
@@ -642,7 +643,7 @@ test("unsubscribe is idempotent, persists, and stops future delivery", async (t)
   };
   const app = createMcpApp({ store: f.store, transport: f.transport, fetchFn, resolveHost: async () => [{ address: "8.8.8.8", family: 4 }] });
   f.transport.setEventHandler(app.deliverEvent);
-  const params = { name: "wechat.message.received", arguments: { channel_id: "second-wechat" }, delivery: { mode: "webhook", url: callbackUrl, secret } };
+  const params = { name: "wechat.message.received", arguments: { channel_id: "wechat" }, delivery: { mode: "webhook", url: callbackUrl, secret } };
   await app.handleRpc("events/subscribe", params, { principal: "owner", scopes: ["wechat:read"] });
   const unsubscribe = { name: params.name, arguments: params.arguments, delivery: { mode: "webhook", url: callbackUrl } };
   await app.handleRpc("events/unsubscribe", unsubscribe, { principal: "owner", scopes: ["wechat:read"] });

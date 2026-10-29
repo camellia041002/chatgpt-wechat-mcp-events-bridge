@@ -41,7 +41,7 @@ try {
   $env:TRANSPORT_STATE_DIR = $RuntimeDir
   $env:TRANSPORT_MODE = 'simulation'
   $env:TRANSPORT_POLLING_ENABLED = 'false'
-  $env:TRANSPORT_CHANNEL_ID = 'second-wechat'
+  $env:TRANSPORT_CHANNEL_ID = 'wechat'
   $env:TRANSPORT_MCP_ALIASES = ($McpAliasPath -join ',')
   $env:TRANSPORT_OAUTH_ALIASES = ($OAuthAliasPath -join ',')
   $env:TRANSPORT_LEGACY_OAUTH_CLIENT_IDS = ($LegacyOAuthClientId -join ',')

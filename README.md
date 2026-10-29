@@ -2,7 +2,8 @@
 
 一个独立、无模型的微信 iLink transport：把微信 ClawBot 收到的消息转换为 MCP Event，交给 ChatGPT Work 自动化生成回复，再通过事件绑定的幂等工具发回微信。
 
-> 用任意一个微信号扫码授权 ClawBot 即可，不需要专门注册新号。注意一个微信号只能绑定一个 ClawBot，如果你的主号已经接了别的 Bot，可以换一个号来接
+> 用任意一个微信号扫码授权 ClawBot 即可，不需要专门注册新号。注意一个微信号只能绑定一个 ClawBot，如果你的主号已经接了别的 Bot，可以换一个号来接。
+
 > 非官方实验项目，与 OpenAI、腾讯或微信没有隶属关系。请仅在你有权使用的账号和环境中部署，并自行确认相关服务条款、隐私与合规要求。
 
 ## 架构
@@ -64,6 +65,12 @@ npm run check
 
 ```powershell
 .\scripts\start-simulation.ps1
+```
+
+Linux 可直接设置安全的临时路由令牌并启动模拟服务：
+
+```bash
+TRANSPORT_ROUTE_TOKEN="$(node -e "console.log(require('node:crypto').randomBytes(36).toString('base64url'))")" TRANSPORT_MODE=simulation TRANSPORT_POLLING_ENABLED=false npm start
 ```
 
 停止该脚本记录的本地进程：

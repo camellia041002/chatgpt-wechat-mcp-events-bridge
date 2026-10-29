@@ -4,7 +4,7 @@ Create exactly one event-triggered task for:
 
 ```text
 event = wechat.message.received
-channel_id = second-wechat
+channel_id = wechat
 ```
 
 The task prompt should require the following invariants:
