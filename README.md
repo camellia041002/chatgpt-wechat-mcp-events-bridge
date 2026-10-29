@@ -1,13 +1,14 @@
 # ChatGPT WeChat MCP Events Bridge
 
-一个独立、无模型的微信 iLink transport：把专用微信号收到的消息转换为 MCP Event，交给 ChatGPT Work 自动化生成回复，再通过事件绑定的幂等工具发回微信。
+一个独立、无模型的微信 iLink transport：把微信 ClawBot 收到的消息转换为 MCP Event，交给 ChatGPT Work 自动化生成回复，再通过事件绑定的幂等工具发回微信。
 
+> 用任意一个微信号扫码授权 ClawBot 即可，不需要专门注册新号。注意一个微信号只能绑定一个 ClawBot，如果你的主号已经接了别的 Bot，可以换一个号来接
 > 非官方实验项目，与 OpenAI、腾讯或微信没有隶属关系。请仅在你有权使用的账号和环境中部署，并自行确认相关服务条款、隐私与合规要求。
 
 ## 架构
 
 ```text
-专用微信号
+微信 ClawBot（扫码授权的微信号）
    │ iLink getupdates / sendmessage
    ▼
 本项目（无模型 transport）
@@ -73,11 +74,11 @@ npm run check
 
 ## 真实账号与部署
 
-真实模式必须显式完成专用账号登录，并主动设置：
+真实模式必须先用微信扫码完成 ClawBot 授权登录，并主动设置：
 
 ```text
 TRANSPORT_MODE=real
-TRANSPORT_ACCOUNT_ID=<dedicated-account-id>
+TRANSPORT_ACCOUNT_ID=<authorized-account-id>
 TRANSPORT_POLLING_ENABLED=true
 ```
 
