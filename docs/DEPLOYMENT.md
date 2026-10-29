@@ -15,7 +15,7 @@ Suggested layout:
 
 ## Environment
 
-Copy `.env.example` into a protected environment file and replace every placeholder. Keep permissions restricted to the service account. Real polling remains disabled until both the dedicated account and `TRANSPORT_POLLING_ENABLED=true` are configured deliberately.
+Copy `.env.example` into a protected environment file and replace every placeholder. Keep permissions restricted to the service account. Real polling remains disabled until both the authorized account and `TRANSPORT_POLLING_ENABLED=true` are configured deliberately.
 
 ## HTTPS endpoint
 
@@ -43,7 +43,7 @@ Review both templates under `deploy/`, then install them under `/etc/systemd/sys
 2. simulation listener and `/healthz`
 3. OAuth/plugin discovery
 4. signed webhook delivery in simulation
-5. dedicated real-account login
+5. ClawBot QR login
 6. natural inbound message, only after explicit authorization
 
 Do not treat source presence, test success, deployment, backend send success, and user-visible receipt as the same result.
