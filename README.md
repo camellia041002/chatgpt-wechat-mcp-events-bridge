@@ -28,6 +28,25 @@ ChatGPT Work 事件自动化
 
 transport 本身不运行语言模型，也不接管 ChatGPT 的上下文或记忆。
 
+## ChatGPT 端适用范围
+
+本项目需要 ChatGPT 中支持 MCP Events 的环境（[官方 MCP Events 文档](https://developers.openai.com/plugins/build/mcp-events)列明：Work 网页、Work Desktop Cloud、dot）。普通 Chat 截至 2026-10-30 的实测无法完成事件订阅，因此不能被微信消息唤醒。
+
+| ChatGPT 环境 | 依据 | 本项目适用性 |
+| --- | --- | --- |
+| Work（网页） | 官方文档列明支持 MCP Events | 适用 |
+| Work（桌面端选择 Cloud） | 官方文档列明支持 MCP Events | 适用 |
+| dot | 官方文档列明支持 MCP Events | 适用 |
+| 普通 Chat | 2026-10-30 本账号网页端实测未建立事件订阅 | 不适用于本文的消息事件唤醒 |
+
+### 普通 Chat 实测记录
+
+2026-10-30 使用全新、独立的 simulation-only POC 在本账号网页普通 Chat 中测试。POC 端点可发现，`get_poc_status` 也能正常返回；但尝试建立 `poc.test.created` 事件订阅时，Chat 宿主的订阅动作返回 `404 Action not found`，没有生成 `subscription_id`，POC 服务端订阅数仍为 0。失败点不是 POC 端点不可达，而是当次普通 Chat 未能建立事件订阅；这是一项带日期和账号范围的实测结果，不代表未来版本的永久结论。
+
+插件在目录中可见或普通工具可调用，都不等于 MCP Events 已接通。
+
+如果必须使用普通 Chat，只能另行设计轮询，或由外部后端主动调用模型/API；这两种方案都不等同于 MCP Events 对既有聊天窗口的原生事件唤醒。
+
 ## 主要能力
 
 - `wechat.message.received` MCP Event，支持文本、语音转写与图片，并可按 `channel_id` 和发送者过滤。
@@ -96,7 +115,7 @@ TRANSPORT_POLLING_ENABLED=true
 - 新订阅只接收订阅建立之后的新事件；创建订阅不会自动 replay 已有 pending。
 - 串行确认机制只管理启用该机制后新收到的事件，不会自动重放旧 pending。
 - pending 仅表示 transport 尚未记录成功回复，不代表 ChatGPT 会自动收到该事件。
-- 订阅建在哪个 ChatGPT 窗口，事件就在那个窗口里处理，并延续那个窗口的上下文；我们的做法是直接在原来聊天的窗口里建订阅。
+- 在官方文档列明支持 MCP Events 的 Work / Work Desktop Cloud / dot 中，订阅建在哪个 ChatGPT 窗口，事件就在那个窗口里处理，并延续那个窗口的上下文；我们的做法是直接在原来聊天的窗口里建订阅。普通 Chat 见上方“适用范围”。
 - `send_wechat_reply` 成功与用户手机端实际看到消息是两个不同证据层级。
 
 ## License
