@@ -30,7 +30,7 @@ transport 本身不运行语言模型，也不接管 ChatGPT 的上下文或记�
 
 ## ChatGPT 端适用范围
 
-本项目已在 ChatGPT Work 网页端跑通。官方 MCP Events 文档还列明支持 Work Desktop Cloud 和 dot。2026-10-30，在本账号网页普通 Chat 的全新独立模拟测试中，普通 MCP 工具可以调用，但事件订阅返回 `404 Action not found`，未生成订阅；因此普通 Chat 的微信事件唤醒尚未验证通过。
+本项目已在 ChatGPT Work 网页端跑通。官方 [MCP Events 文档](https://developers.openai.com/plugins/build/mcp-events)还列明支持 Work Desktop Cloud 和 dot。2026-10-30，在本账号网页普通 Chat 的全新独立模拟测试中，普通 MCP 工具可以调用，但事件订阅返回 `404 Action not found`，未生成订阅；因此普通 Chat 的微信事件唤醒尚未验证通过。
 
 | ChatGPT 环境 | 证据 | 本项目适用性 |
 | --- | --- | --- |
