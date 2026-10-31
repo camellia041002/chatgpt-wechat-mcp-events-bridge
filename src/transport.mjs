@@ -150,6 +150,7 @@ export class WeChatTransport {
       name: EVENT_NAME,
       timestamp: normalized.receivedAt,
       data: {
+        event_id: normalized.eventId,
         channel_id: this.channelId,
         sender_id: normalized.senderId,
         conversation_id: normalized.conversationId,
@@ -445,7 +446,7 @@ export class WeChatTransport {
       }
 
       const attempt = attemptIndex + 1;
-      const webhookId = attempt === 1 ? event.eventId : `${event.eventId}.retry.${attempt}`;
+      const webhookId = event.eventId;
       dispatch.state = "delivering";
       dispatch.attempts = attempt;
       dispatch.lastWebhookId = webhookId;

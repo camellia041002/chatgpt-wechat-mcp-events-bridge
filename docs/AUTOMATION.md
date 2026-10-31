@@ -32,7 +32,9 @@ idempotency_key = reply:<eventId>
 
 The transport serializes only events received after the acknowledgement dispatcher was deployed. It waits for a successful write receipt for the current event before delivering the next event. A webhook HTTP 200 alone is not considered completion.
 
-If no write-tool receipt appears before the bounded acknowledgement timeout, the transport may redeliver the same event with a fresh webhook delivery ID. The event body retains the original `eventId`, so every run must continue using exactly `reply:<eventId>`. The reply tool enforces that key and preserves stable outbound client IDs, making overlapping retry runs idempotent.
+If no write-tool receipt appears before the bounded acknowledgement timeout, the transport may redeliver the same event. Standard Webhooks identity must remain stable across retries: the `webhook-id` header and the event body's `eventId` identify the same logical event and must not be changed merely to force another delivery. The payload also carries the same value as `data.event_id`, so every run must continue using exactly `reply:<eventId>`. The reply tool enforces that key and preserves stable outbound client IDs, making overlapping retry runs idempotent.
+
+Keep content events separate from operational alerts. A bridge outage, recovery attempt, or delivery-health warning should use an authenticated backend notification path and its own idempotency key; it should not be disguised as user content or wake the conversational agent merely so the agent can forward an infrastructure message.
 
 Historical pending events without dispatcher metadata are excluded from automatic replay. They still require an explicit recovery decision.
 

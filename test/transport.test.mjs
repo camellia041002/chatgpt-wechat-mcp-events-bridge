@@ -224,7 +224,7 @@ test("managed event dispatch waits for a successful write before delivering the 
   await waitUntil(() => f.store.state.inboundEvents.find((item) => item.eventId === second.eventId)?.internal?.dispatch?.state === "acknowledged");
 });
 
-test("missing write acknowledgement redelivers the same event with a distinct webhook id", async (t) => {
+test("missing write acknowledgement redelivers the same event with a stable webhook id", async (t) => {
   const f = fixture({ eventAckTimeoutMs: 20, eventRetryDelaysMs: [0, 0] });
   t.after(f.cleanup);
   const deliveries = [];
@@ -245,9 +245,22 @@ test("missing write acknowledgement redelivers the same event with a distinct we
   await waitUntil(() => deliveries.length === 2);
   assert.deepEqual(deliveries.map((item) => item.eventId), [event.eventId, event.eventId]);
   assert.equal(deliveries[0].webhookId, event.eventId);
-  assert.equal(deliveries[1].webhookId, `${event.eventId}.retry.2`);
+  assert.equal(deliveries[1].webhookId, event.eventId);
   await waitUntil(() => f.store.state.inboundEvents.find((item) => item.eventId === event.eventId)?.internal?.dispatch?.state === "acknowledged");
   assert.equal(f.store.state.writeReceipts.filter((item) => item.status === "succeeded").length, 1);
+});
+
+test("event payload exposes the stable event id inside data", async (t) => {
+  const f = fixture({ serialEventDispatchEnabled: false });
+  t.after(f.cleanup);
+  let delivered;
+  f.transport.setEventHandler(async (event) => {
+    delivered = event;
+    return [{ accepted: true, status: 200 }];
+  });
+  const event = await f.transport.acceptRawMessage(inbound(), { accountId: "simulation-account" });
+  assert.equal(event.data.event_id, event.eventId);
+  assert.equal(delivered.data.event_id, delivered.eventId);
 });
 
 test("dispatcher resume never replays legacy pending events", async (t) => {
