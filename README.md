@@ -108,7 +108,7 @@ TRANSPORT_ACCOUNT_ID=<authorized-account-id>
 TRANSPORT_POLLING_ENABLED=true
 ```
 
-不要提交 `runtime/`、`.env`、二维码、账号文件或任何 token。Linux systemd、HTTPS tunnel 和插件模板见 [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md)。ChatGPT 自动化规则见 [docs/AUTOMATION.md](docs/AUTOMATION.md)，重试身份、运维通知分流和换窗经验见 [docs/RELIABILITY_PLAYBOOK.md](docs/RELIABILITY_PLAYBOOK.md)。
+不要提交 `runtime/`、`.env`、二维码、账号文件或任何 token。Linux systemd、HTTPS tunnel 和插件模板见 [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md)。ChatGPT 自动化规则见 [docs/AUTOMATION.md](docs/AUTOMATION.md)，常见错误的分层判断见 [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md)，重试身份、运维通知分流和换窗经验见 [docs/RELIABILITY_PLAYBOOK.md](docs/RELIABILITY_PLAYBOOK.md)。
 
 ## 重要语义
 
