@@ -14,6 +14,7 @@ const DEFAULT_CHUNK_DELAY_MS = 900;
 const DEFAULT_EVENT_ACK_TIMEOUT_MS = 75_000;
 const DEFAULT_EVENT_SEND_TIMEOUT_MS = 300_000;
 const DEFAULT_EVENT_RETRY_DELAYS_MS = [0, 5_000, 15_000];
+const DEFAULT_WRITE_RETRY_DELAYS_MS = [0, 1_000, 3_000];
 
 export class WeChatTransport {
   constructor({
@@ -33,6 +34,7 @@ export class WeChatTransport {
     eventAckTimeoutMs = DEFAULT_EVENT_ACK_TIMEOUT_MS,
     eventSendTimeoutMs = DEFAULT_EVENT_SEND_TIMEOUT_MS,
     eventRetryDelaysMs = DEFAULT_EVENT_RETRY_DELAYS_MS,
+    writeRetryDelaysMs = DEFAULT_WRITE_RETRY_DELAYS_MS,
   }) {
     this.store = store;
     this.ilinkClient = ilinkClient;
@@ -50,6 +52,7 @@ export class WeChatTransport {
     this.eventAckTimeoutMs = boundedDuration(eventAckTimeoutMs, DEFAULT_EVENT_ACK_TIMEOUT_MS, 0, 10 * 60_000);
     this.eventSendTimeoutMs = boundedDuration(eventSendTimeoutMs, DEFAULT_EVENT_SEND_TIMEOUT_MS, 1_000, 30 * 60_000);
     this.eventRetryDelaysMs = normalizeRetryDelays(eventRetryDelaysMs);
+    this.writeRetryDelaysMs = normalizeRetryDelays(writeRetryDelaysMs).slice(0, 3);
     this.inFlightWrites = new Map();
     this.eventDispatchPromise = null;
   }
@@ -329,7 +332,7 @@ export class WeChatTransport {
         if (!contextToken) throw new Error("No context_token is available for this event sender");
         for (let index = 0; index < chunks.length; index += 1) {
           const deliveryText = finalizeWeixinDeliveryChunk(chunks[index]) || "Completed.";
-          await this.ilinkClient.sendText({
+          await this.#sendTextWithRetry({
             baseUrl: account.baseUrl,
             token: account.token,
             toUserId: normalizedUserId,
@@ -337,7 +340,10 @@ export class WeChatTransport {
             contextToken,
             clientId: receipt.clientIds[index],
             runId: receipt.runId,
+            receipt,
           });
+          receipt.deliveredChunks = index + 1;
+          this.store.save();
           if (index < chunks.length - 1 && this.chunkDelayMs > 0) {
             await sleep(resolveWeixinChunkDelayMs(deliveryText, this.chunkDelayMs, this.random));
           }
@@ -362,6 +368,29 @@ export class WeChatTransport {
       this.store.save();
       throw error;
     }
+  }
+
+  async #sendTextWithRetry({ receipt, ...request }) {
+    let lastError;
+    for (let attemptIndex = 0; attemptIndex < this.writeRetryDelaysMs.length; attemptIndex += 1) {
+      const delayMs = this.writeRetryDelaysMs[attemptIndex];
+      if (delayMs > 0) await sleep(delayMs);
+      try {
+        receipt.sendAttempts = Number(receipt.sendAttempts || 0) + 1;
+        receipt.lastSendAttemptAt = this.now().toISOString();
+        this.store.save();
+        const result = await this.ilinkClient.sendText(request);
+        receipt.lastSendErrorCode = "";
+        this.store.save();
+        return result;
+      } catch (error) {
+        lastError = error;
+        receipt.lastSendErrorCode = classifySendError(error);
+        this.store.save();
+        if (!isRetryableSendError(error) || attemptIndex === this.writeRetryDelaysMs.length - 1) break;
+      }
+    }
+    throw lastError;
   }
 
   #selectedAccount(expectedAccountId = this.accountId) {
@@ -872,8 +901,16 @@ function classifySendError(error) {
   const message = String(error?.message ?? "").toLowerCase();
   if (message.includes("context_token")) return "missing_context_token";
   if (message.includes("ret=-2")) return "ilink_prepare_rejected";
+  if (/http (408|429)\b/.test(message)) return message.includes("429") ? "ilink_rate_limited" : "timeout";
+  if (/http 5\d\d\b/.test(message)) return "ilink_http_5xx";
+  if (/http 4\d\d\b/.test(message)) return "ilink_http_4xx";
+  if (message.includes("fetch failed") || message.includes("econn") || message.includes("socket") || message.includes("network")) return "network_error";
   if (message.includes("abort") || message.includes("timeout")) return "timeout";
   return "send_failed";
+}
+
+function isRetryableSendError(error) {
+  return !["missing_context_token", "ilink_prepare_rejected", "ilink_http_4xx"].includes(classifySendError(error));
 }
 
 export {

@@ -38,6 +38,7 @@ function fixture(options = {}) {
     eventAckTimeoutMs: options.eventAckTimeoutMs ?? 0,
     eventSendTimeoutMs: options.eventSendTimeoutMs ?? 1_000,
     eventRetryDelaysMs: options.eventRetryDelaysMs ?? [0],
+    writeRetryDelaysMs: options.writeRetryDelaysMs ?? [0],
   });
   return { stateDir, store, transport, ilinkClient, sent, cleanup: () => fs.rmSync(stateDir, { recursive: true, force: true }) };
 }
@@ -679,6 +680,43 @@ test("real reply fails closed when no context token exists", async (t) => {
   }), /context_token/);
   assert.equal(f.sent.length, 0);
   assert.equal(f.store.state.writeReceipts.at(-1).errorCode, "missing_context_token");
+});
+
+test("real reply retries transient iLink failures with the same client id", async (t) => {
+  const calls = [];
+  const ilinkClient = {
+    async sendText(value) {
+      calls.push(value);
+      if (calls.length === 1) throw new Error("fetch failed: socket closed");
+      return { ret: 0 };
+    },
+    async getUpdates() { return { ret: 0, msgs: [], get_updates_buf: "" }; },
+  };
+  const f = fixture({ mode: "real", accountId: "account-1", ilinkClient, serialEventDispatchEnabled: false, writeRetryDelaysMs: [0, 0, 0] });
+  t.after(f.cleanup);
+  f.store.saveAccount("account-1", { token: "secret", baseUrl: "https://ilink.example" });
+  const event = await f.transport.acceptRawMessage(inbound(), { accountId: "account-1" });
+  const result = await f.transport.sendReply({ eventId: event.eventId, toUserId: "wx-user-1", text: "reply", idempotencyKey: `reply:${event.eventId}` });
+  assert.equal(result.status, "succeeded");
+  assert.equal(calls.length, 2);
+  assert.equal(calls[0].clientId, calls[1].clientId);
+  assert.equal(f.store.state.writeReceipts.at(-1).sendAttempts, 2);
+  assert.equal(f.store.state.writeReceipts.at(-1).lastSendErrorCode, "");
+});
+
+test("real reply does not retry an explicit iLink prepare rejection", async (t) => {
+  let calls = 0;
+  const ilinkClient = {
+    async sendText() { calls += 1; throw new Error("sendMessage ret=-2 errcode= errmsg=rejected"); },
+    async getUpdates() { return { ret: 0, msgs: [], get_updates_buf: "" }; },
+  };
+  const f = fixture({ mode: "real", accountId: "account-1", ilinkClient, serialEventDispatchEnabled: false, writeRetryDelaysMs: [0, 0, 0] });
+  t.after(f.cleanup);
+  f.store.saveAccount("account-1", { token: "secret", baseUrl: "https://ilink.example" });
+  const event = await f.transport.acceptRawMessage(inbound(), { accountId: "account-1" });
+  await assert.rejects(f.transport.sendReply({ eventId: event.eventId, toUserId: "wx-user-1", text: "reply", idempotencyKey: `reply:${event.eventId}` }), /ret=-2/);
+  assert.equal(calls, 1);
+  assert.equal(f.store.state.writeReceipts.at(-1).errorCode, "ilink_prepare_rejected");
 });
 
 test("write tool requires the reply OAuth scope", async (t) => {

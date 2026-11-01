@@ -15,6 +15,8 @@
 | 回复工具成功，但手机没有看到消息 | iLink 写回或客户端可见性 | 分开核对工具回执、transport 写入和手机端实际接收 |
 | 同一条微信收到多次回复 | 重试身份或幂等 | 检查稳定 `webhook-id`、原始 `eventId` 和 `reply:<eventId>` |
 
+对于瞬时网络错误、超时、HTTP 5xx 或限流，transport 会使用相同的分段 client ID 和 run ID 做有界重试。明确的 missing context、iLink prepare rejection 和确定性 HTTP 4xx 不会盲目重试；这类错误需要先修复账号、上下文或请求条件。
+
 ## Events 可见，但任务服务报错且没有订阅请求
 
 典型现象：

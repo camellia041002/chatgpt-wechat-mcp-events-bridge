@@ -372,6 +372,7 @@ export function createRuntime(options = {}) {
     eventAckTimeoutMs: options.eventAckTimeoutMs ?? Number(process.env.TRANSPORT_EVENT_ACK_TIMEOUT_MS || 75_000),
     eventSendTimeoutMs: options.eventSendTimeoutMs ?? Number(process.env.TRANSPORT_EVENT_SEND_TIMEOUT_MS || 300_000),
     eventRetryDelaysMs: options.eventRetryDelaysMs,
+    writeRetryDelaysMs: options.writeRetryDelaysMs ?? String(process.env.TRANSPORT_WRITE_RETRY_DELAYS_MS || "0,1000,3000").split(",").map((item) => Number(item.trim())),
   });
   const app = createMcpApp({ store, transport, ...(options.mcpOptions || {}) });
   transport.setEventHandler(app.deliverEvent);
