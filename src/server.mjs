@@ -371,12 +371,19 @@ export function createRuntime(options = {}) {
     serialEventDispatchEnabled: options.serialEventDispatchEnabled ?? process.env.TRANSPORT_SERIAL_EVENT_DISPATCH_ENABLED !== "false",
     eventAckTimeoutMs: options.eventAckTimeoutMs ?? Number(process.env.TRANSPORT_EVENT_ACK_TIMEOUT_MS || 75_000),
     eventSendTimeoutMs: options.eventSendTimeoutMs ?? Number(process.env.TRANSPORT_EVENT_SEND_TIMEOUT_MS || 300_000),
-    eventRetryDelaysMs: options.eventRetryDelaysMs,
+    eventRetryDelaysMs: options.eventRetryDelaysMs ?? parseNumberList(process.env.TRANSPORT_EVENT_RETRY_DELAYS_MS, [0, 5_000, 15_000]),
     writeRetryDelaysMs: options.writeRetryDelaysMs ?? String(process.env.TRANSPORT_WRITE_RETRY_DELAYS_MS || "0,1000,3000").split(",").map((item) => Number(item.trim())),
   });
   const app = createMcpApp({ store, transport, ...(options.mcpOptions || {}) });
   transport.setEventHandler(app.deliverEvent);
   return { store, ilinkClient, transport, app };
+}
+
+function parseNumberList(value, fallback) {
+  const text = String(value ?? "").trim();
+  if (!text) return fallback;
+  const values = text.split(",").map((item) => Number(item.trim()));
+  return values.length && values.every((item) => Number.isFinite(item) && item >= 0) ? values : fallback;
 }
 
 async function runMain() {

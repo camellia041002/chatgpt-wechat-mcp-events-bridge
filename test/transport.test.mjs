@@ -6,7 +6,7 @@ import path from "node:path";
 import test from "node:test";
 import { Webhook } from "standardwebhooks";
 import { createMcpApp, assertSafeCallbackUrl } from "../src/mcp-app.mjs";
-import { createHttpServer } from "../src/server.mjs";
+import { createHttpServer, createRuntime } from "../src/server.mjs";
 import { ILinkClient } from "../src/ilink-client.mjs";
 import { StateStore } from "../src/state-store.mjs";
 import {
@@ -262,6 +262,19 @@ test("event payload exposes the stable event id inside data", async (t) => {
   const event = await f.transport.acceptRawMessage(inbound(), { accountId: "simulation-account" });
   assert.equal(event.data.event_id, event.eventId);
   assert.equal(delivered.data.event_id, delivered.eventId);
+});
+
+test("runtime accepts a single-delivery event retry policy from the environment", (t) => {
+  const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "wwit-runtime-"));
+  const previous = process.env.TRANSPORT_EVENT_RETRY_DELAYS_MS;
+  process.env.TRANSPORT_EVENT_RETRY_DELAYS_MS = "0";
+  t.after(() => {
+    if (previous === undefined) delete process.env.TRANSPORT_EVENT_RETRY_DELAYS_MS;
+    else process.env.TRANSPORT_EVENT_RETRY_DELAYS_MS = previous;
+    fs.rmSync(stateDir, { recursive: true, force: true });
+  });
+  const runtime = createRuntime({ stateDir, pollingEnabled: false, serialEventDispatchEnabled: false });
+  assert.deepEqual(runtime.transport.eventRetryDelaysMs, [0]);
 });
 
 test("dispatcher resume never replays legacy pending events", async (t) => {
