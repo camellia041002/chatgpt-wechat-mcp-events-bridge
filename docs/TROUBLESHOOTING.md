@@ -11,11 +11,25 @@
 | Events 可见，但服务器没有收到 `events/subscribe`，`subscriptions=0` | ChatGPT 任务创建或插件注册状态 | 使用受支持的 Work 环境，刷新 Events，换干净的 Work 对话；必要时重建 development 插件连接 |
 | 收到 `events/subscribe`，但订阅创建失败 | transport 的订阅或回调验证 | 检查 JSON-RPC 错误、参数、callback HTTPS、签名密钥和 verification 响应 |
 | `subscriptions>0`，但微信消息没有形成事件 | 微信轮询或事件过滤 | 检查 real mode、polling、`channel_id`、`sender_id` 和入站计数 |
+| 文字/图片正常，PPTX、PDF、DOCX、TXT 等文件完全没有形成事件 | transport 未处理 iLink `file_item`，或文件被类型/大小/完整性校验拒绝 | 确认版本包含 `get_wechat_file`，并检查事件的 `file_count` / `file_error_count` |
 | 事件已投递，但 ChatGPT 没有调用回复工具 | ChatGPT 事件运行 | 检查任务运行记录、事件 payload、保存的 prompt 和工具权限 |
 | 回复工具成功，但手机没有看到消息 | iLink 写回或客户端可见性 | 分开核对工具回执、transport 写入和手机端实际接收 |
 | 同一条微信收到多次回复 | 重试身份或幂等 | 检查稳定 `webhook-id`、原始 `eventId` 和 `reply:<eventId>` |
 
 对于瞬时网络错误、超时、HTTP 5xx 或限流，transport 会使用相同的分段 client ID 和 run ID 做有界重试。明确的 missing context、iLink prepare rejection 和确定性 HTTP 4xx 不会盲目重试；这类错误需要先修复账号、上下文或请求条件。
+
+## 文字和图片正常，但文件消息消失
+
+iLink 把普通文件放在 `item_list[].type=4` 的 `file_item` 中。只解析文字、语音和图片的旧版 transport 会在 ChatGPT 之前丢掉这类消息，因此服务器既不会产生 `wechat.message.received`，任务也没有机会读取文件。
+
+更新后按以下证据判断：
+
+- `file_count>0`：文件已下载、解密、类型校验并保存；任务应按零起始索引逐个调用 `get_wechat_file`；
+- `file_error_count>0`：消息仍会形成事件，但至少一个文件因不支持、过大、下载失败、密文损坏、签名不符或 OOXML 安全校验失败而不可读；
+- 两个计数都为 `0` 且只有文件：检查收到的原始 iLink 项是否确为 `type=4/file_item`，以及 transport 是否已更新并重启；
+- 工具返回 `extraction_status=unavailable`：原始文件仍通过 MCP resource/audio content 返回，只是桥端没有提取文字；这不是下载失败。
+
+不要为了“让任务继续”而猜测文件正文。附件失败应明确告知用户，并继续处理同一事件中可读的文字或其他附件。
 
 ## 事件已接受，但回复越来越慢
 

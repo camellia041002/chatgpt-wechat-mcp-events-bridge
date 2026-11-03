@@ -16,11 +16,12 @@
     "start": "node src/server.mjs",
     "login": "node src/cli.mjs login",
     "status": "node src/cli.mjs status",
-    "check": "node --check src/server.mjs && node --check src/mcp-app.mjs && node --check src/transport.mjs && node --check src/media-store.mjs && node --check src/ilink-client.mjs && node --test test/*.test.mjs",
+    "check": "node --check src/server.mjs && node --check src/mcp-app.mjs && node --check src/transport.mjs && node --check src/media-store.mjs && node --check src/file-store.mjs && node --check src/office-text.mjs && node --check src/ilink-client.mjs && node --test test/*.test.mjs",
     "test": "node --test test/*.test.mjs"
   },
   "dependencies": {
     "qrcode": "1.5.4",
-    "standardwebhooks": "1.1.1"
+    "standardwebhooks": "1.1.1",
+    "yauzl": "3.4.0"
   }
 }

@@ -13,6 +13,7 @@ import {
   WeChatTransport,
   chunkReplyTextForWeixin,
   finalizeWeixinDeliveryChunk,
+  normalizeInboundMessage,
   prepareWeixinDeliveryChunks,
   resolveWeixinChunkDelayMs,
 } from "../src/transport.mjs";
@@ -77,11 +78,12 @@ test("discovery exposes the real event and only bounded transport tools", async 
   const events = await app.handleRpc("events/list", {}, { scopes: ["wechat:read"] });
   const tools = await app.handleRpc("tools/list", {}, { scopes: ["wechat:read"] });
   assert.deepEqual(events.events.map((item) => item.name), ["wechat.message.received"]);
-  assert.deepEqual(tools.tools.map((item) => item.name), ["get_transport_status", "get_pending_wechat_messages", "get_wechat_image", "send_wechat_reply"]);
+  assert.deepEqual(tools.tools.map((item) => item.name), ["get_transport_status", "get_pending_wechat_messages", "get_wechat_image", "get_wechat_file", "send_wechat_reply"]);
   assert.equal(tools.tools[1].annotations.readOnlyHint, true);
   assert.equal(tools.tools[2].annotations.readOnlyHint, true);
-  assert.equal(tools.tools[3].annotations.destructiveHint, true);
-  assert.equal(tools.tools[3].annotations.idempotentHint, true);
+  assert.equal(tools.tools[3].annotations.readOnlyHint, true);
+  assert.equal(tools.tools[4].annotations.destructiveHint, true);
+  assert.equal(tools.tools[4].annotations.idempotentHint, true);
 });
 
 test("iLink QR login uses the current POST contract and supports redirect verification", async () => {
@@ -378,6 +380,8 @@ test("scheduled polling tool returns oldest pending messages and removes them on
     message_type: "text",
     image_count: 0,
     image_error_count: 0,
+    file_count: 0,
+    file_error_count: 0,
     received_at: "2026-10-27T00:00:00.000Z",
   });
   assert.equal("context_token" in pending.messages[0], false);
@@ -471,6 +475,29 @@ test("natural reply bubbles share one logical run id and keep distinct client id
   assert.equal(new Set(f.sent.map((item) => item.clientId)).size, 2);
 });
 
+test("messages without files preserve the pre-file-ingestion dedup key", () => {
+  const normalized = normalizeInboundMessage({
+    from_user_id: "wx-user-1",
+    message_id: "legacy-message",
+    client_id: "legacy-client",
+    message_type: 1,
+    create_time_ms: 1793059200000,
+    item_list: [{ type: 1, text_item: { text: "兼容旧去重键" } }],
+  }, { accountId: "account-1", channelId: "wechat" });
+  assert.equal(normalized.dedupKey, "f5d230e17b5edd2f2b91e02d2e4db07eac91016e93225b292acede3bf7e9e5df");
+});
+
+test("persisted pre-upgrade events receive file-count defaults", (t) => {
+  const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "wwit-state-migration-"));
+  t.after(() => fs.rmSync(stateDir, { recursive: true, force: true }));
+  fs.writeFileSync(path.join(stateDir, "transport-state.json"), JSON.stringify({
+    inboundEvents: [{ eventId: "legacy-event", data: { text: "legacy" } }],
+  }));
+  const store = new StateStore({ stateDir });
+  assert.equal(store.state.inboundEvents[0].data.file_count, 0);
+  assert.equal(store.state.inboundEvents[0].data.file_error_count, 0);
+});
+
 test("message deduplication and context tokens survive a store restart", async (t) => {
   const f = fixture();
   t.after(f.cleanup);
@@ -548,7 +575,7 @@ test("OAuth DCR, explicit consent, PKCE, token exchange, and authenticated MCP c
     method: "POST", headers: { "Content-Type": "application/json", Authorization: `Bearer ${token.access_token}` },
     body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list", params: {} }),
   })).json();
-  assert.deepEqual(rpc.result.tools.map((item) => item.name), ["get_transport_status", "get_pending_wechat_messages", "get_wechat_image", "send_wechat_reply"]);
+  assert.deepEqual(rpc.result.tools.map((item) => item.name), ["get_transport_status", "get_pending_wechat_messages", "get_wechat_image", "get_wechat_file", "send_wechat_reply"]);
   const reopened = new StateStore({ stateDir: f.stateDir });
   assert.equal(Object.keys(reopened.state.oauth.accessTokens).length, 1);
 });

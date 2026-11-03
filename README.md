@@ -13,7 +13,7 @@
    │ iLink getupdates / sendmessage
    ▼
 本项目（无模型 transport）
-   ├─ 有界图片下载、解密与私有存储
+   ├─ 有界图片/文件下载、解密与私有存储
    ├─ 持久化事件与订阅
    ├─ MCP 2.0 + OAuth DCR/PKCE
    ├─ Standard Webhooks 签名投递
@@ -49,15 +49,18 @@ transport 本身不运行语言模型，也不接管 ChatGPT 的上下文或记�
 
 ## 主要能力
 
-- `wechat.message.received` MCP Event，支持文本、语音转写与图片，并可按 `channel_id` 和发送者过滤。
+- `wechat.message.received` MCP Event，支持文本、语音转写、图片和常见文件，并可按 `channel_id` 和发送者过滤。
 - `get_transport_status`：只读、脱敏的健康状态和计数。
 - `get_pending_wechat_messages`：读取最早的未成功回复事件，不返回 iLink `context_token`。
 - `get_wechat_image`：按事件 ID 与零起始索引读取一张已校验图片，以 MCP image content block 返回。
+- `get_wechat_file`：按事件 ID 与零起始索引读取一个已校验文件，返回原始 MCP resource、可用的提取文字，并为音频附加 audio content block。
 - `send_wechat_reply`：只能回复事件原发送者，使用 `reply:<event_id>` 幂等键。
 - webhook 签名、回调地址校验、有限重试、重启后持久化。
 - 入站去重、并发幂等写、机器人消息回环保护。
 - 新事件按顺序投递；上一事件出现成功写回回执后才投递下一事件。回执超时时以新的 webhook delivery ID 重投同一原事件，仍强制使用原事件幂等键。
 - 图片最多每事件 4 张、每张 20 MiB，仅允许 HTTPS 可信媒体主机，并校验 PNG/JPEG/GIF/WebP 内容；媒体 URL、解密密钥与图片字节不会进入 webhook 事件。
+- 文件最多每事件 4 个、每个 25 MiB，支持 PDF、DOCX、TXT、PPTX、XLSX、XLS、CSV、TSV 和常见音频；仅公开成功/失败计数，URL、密钥、文件名和字节不会进入 webhook 事件。
+- DOCX/PPTX/XLSX 采用有界 OOXML 文本提取，限制 ZIP 条目数、单项和总解压大小，并拒绝路径穿越、符号链接、重复/加密条目、伪造扩展名与损坏密文。
 - 自然分片：按段落、列表与句末标点切分，单片上限 3,800 字符。
 
 ## 安全默认值
@@ -66,7 +69,7 @@ transport 本身不运行语言模型，也不接管 ChatGPT 的上下文或记�
 - `TRANSPORT_POLLING_ENABLED=false`
 - 仅监听 `127.0.0.1`
 - 运行状态、账号令牌、OAuth token、webhook secret 和消息上下文只存入被忽略的 `runtime/`
-- 图片仅存入隔离的运行状态目录，目录和文件采用私有权限
+- 图片和文件仅存入隔离的运行状态目录，目录和文件采用私有权限；文件总配额 1 GiB，最多随最近 500 个事件保留 30 天
 - 测试全部使用 fake iLink 与 fake webhook，不访问真实微信
 
 ## 本地验证
@@ -78,7 +81,7 @@ npm install
 npm run check
 ```
 
-当前回归集包含 32 项测试，覆盖图片读取、串行确认门控、可配置事件重投、回执超时重投、历史 pending 隔离与幂等写回。
+当前回归集包含 48 项测试，覆盖图片/文件读取、OOXML 类型与富文本提取校验、ZIP 防护、音频容器校验、配额清理与并发写入、升级前去重键与历史事件兼容、串行确认门控、可配置事件重投、回执超时重投、历史 pending 隔离与幂等写回。
 
 启动默认关闭真实网络访问的模拟服务：
 

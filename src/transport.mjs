@@ -5,6 +5,12 @@ import {
   persistInboundImages,
   readStoredImage,
 } from "./media-store.mjs";
+import {
+  extractInboundFileRefs,
+  persistInboundFiles,
+  pruneOrphanedFiles,
+  readStoredFile,
+} from "./file-store.mjs";
 
 const EVENT_NAME = "wechat.message.received";
 const MAX_REPLY_CHARS = 24_000;
@@ -55,6 +61,7 @@ export class WeChatTransport {
     this.writeRetryDelaysMs = normalizeRetryDelays(writeRetryDelaysMs).slice(0, 3);
     this.inFlightWrites = new Map();
     this.eventDispatchPromise = null;
+    this.inboundIngestPromise = Promise.resolve();
   }
 
   status() {
@@ -81,6 +88,18 @@ export class WeChatTransport {
   setEventHandler(handler) {
     if (typeof handler !== "function") throw new Error("event handler must be a function");
     this.onEvent = handler;
+  }
+
+  async #withInboundIngestLock(action) {
+    const previous = this.inboundIngestPromise;
+    let release;
+    this.inboundIngestPromise = new Promise((resolve) => { release = resolve; });
+    await previous;
+    try {
+      return await action();
+    } finally {
+      release();
+    }
   }
 
   resumeEventDispatch() {
@@ -130,8 +149,9 @@ export class WeChatTransport {
     });
     if (!normalized) return null;
 
-    const existingId = this.store.state.processedMessages[normalized.dedupKey];
-    if (existingId) return null;
+    const event = await this.#withInboundIngestLock(async () => {
+      const existingId = this.store.state.processedMessages[normalized.dedupKey];
+      if (existingId) return null;
 
     if (normalized.contextToken) {
       this.store.rememberContextToken(normalized.accountId, normalized.senderId, normalized.contextToken);
@@ -147,8 +167,24 @@ export class WeChatTransport {
           fetchFn: this.mediaFetchFn,
         })
       : { images: [], errors: [] };
+    const retainedFilesBeforeIngest = this.store.state.inboundEvents.flatMap((item) => (item.internal?.files || []).flatMap((file) => [
+      { relativePath: file.relativePath, receivedAt: item.timestamp },
+      ...(file.textRelativePath ? [{ relativePath: file.textRelativePath, receivedAt: item.timestamp }] : []),
+    ]));
+    const documents = normalized.fileRefs.length
+      ? await persistInboundFiles({
+          fileRefs: normalized.fileRefs,
+          stateDir: this.store.stateDir,
+          eventId: normalized.eventId,
+          receivedAt: normalized.receivedAt,
+          cdnBaseUrl: this.mediaCdnBaseUrl,
+          fetchFn: this.mediaFetchFn,
+          retainedFiles: retainedFilesBeforeIngest,
+          now: this.now(),
+        })
+      : { files: [], errors: [] };
 
-    const event = {
+    const acceptedEvent = {
       eventId: normalized.eventId,
       name: EVENT_NAME,
       timestamp: normalized.receivedAt,
@@ -162,6 +198,8 @@ export class WeChatTransport {
         message_type: normalized.messageType,
         image_count: media.images.length,
         image_error_count: media.errors.length,
+        file_count: documents.files.length,
+        file_error_count: documents.errors.length,
         received_at: normalized.receivedAt,
       },
       cursor: null,
@@ -171,6 +209,8 @@ export class WeChatTransport {
         dedupKey: normalized.dedupKey,
         images: media.images,
         imageErrors: media.errors,
+        files: documents.files,
+        fileErrors: documents.errors,
         ...(this.serialEventDispatchEnabled ? {
           dispatch: {
             managed: true,
@@ -181,9 +221,24 @@ export class WeChatTransport {
         } : {}),
       },
     };
-    this.store.state.inboundEvents.push(event);
-    this.store.state.processedMessages[normalized.dedupKey] = event.eventId;
+    this.store.state.inboundEvents.push(acceptedEvent);
+    this.store.state.processedMessages[normalized.dedupKey] = acceptedEvent.eventId;
     this.store.save();
+    try {
+      const retainedFiles = this.store.state.inboundEvents.flatMap((item) => (item.internal?.files || []).flatMap((file) => [
+        { relativePath: file.relativePath, receivedAt: item.timestamp },
+        ...(file.textRelativePath ? [{ relativePath: file.textRelativePath, receivedAt: item.timestamp }] : []),
+      ]));
+      const pruned = await pruneOrphanedFiles({ stateDir: this.store.stateDir, retainedFiles, now: this.now() });
+      if (pruned.removedFiles > 0) {
+        console.error(JSON.stringify({ component: "file_prune", removed_files: pruned.removedFiles, removed_bytes: pruned.removedBytes }));
+      }
+    } catch (error) {
+      console.error(JSON.stringify({ component: "file_prune", error_name: String(error?.name || "Error"), error_code: String(error?.code || "unknown") }));
+    }
+      return acceptedEvent;
+    });
+    if (!event) return null;
     if (this.serialEventDispatchEnabled) {
       const wasIdle = !this.eventDispatchPromise;
       this.#ensureEventDispatcher();
@@ -228,6 +283,8 @@ export class WeChatTransport {
         messageType: event.data.message_type || "text",
         imageCount: Number(event.data.image_count) || 0,
         imageErrorCount: Number(event.data.image_error_count) || 0,
+        fileCount: Number(event.data.file_count) || 0,
+        fileErrorCount: Number(event.data.file_error_count) || 0,
         receivedAt: event.data.received_at,
       })),
     };
@@ -252,6 +309,38 @@ export class WeChatTransport {
       sizeBytes: stored.sizeBytes,
       sha256: stored.sha256,
       data: stored.bytes.toString("base64"),
+    };
+  }
+
+  async getFile({ eventId, fileIndex = 0 }) {
+    const normalizedEventId = requireText(eventId, "event_id", 200);
+    const normalizedIndex = Number(fileIndex);
+    if (!Number.isInteger(normalizedIndex) || normalizedIndex < 0 || normalizedIndex > 3) {
+      throw new Error("file_index must be an integer from 0 to 3");
+    }
+    const event = this.store.state.inboundEvents.find((item) => item.eventId === normalizedEventId);
+    if (!event) throw new Error("event_id is not a known inbound WeChat event");
+    const file = event.internal?.files?.[normalizedIndex];
+    if (!file) throw new Error("file_index is not available for this event");
+    const stored = await readStoredFile({
+      stateDir: this.store.stateDir,
+      relativePath: file.relativePath,
+      expectedFileName: file.fileName,
+      extraction: file,
+    });
+    if (stored.sha256 !== file.sha256) throw new Error("stored file integrity check failed");
+    return {
+      eventId: normalizedEventId,
+      fileIndex: normalizedIndex,
+      fileName: stored.fileName,
+      mimeType: stored.mimeType,
+      sizeBytes: stored.sizeBytes,
+      sha256: stored.sha256,
+      data: stored.bytes.toString("base64"),
+      extractionStatus: stored.extractionStatus,
+      extractedText: stored.extractedText,
+      extractedCharacterCount: stored.extractedCharacterCount,
+      textTruncated: stored.textTruncated,
     };
   }
 
@@ -597,8 +686,10 @@ export function normalizeInboundMessage(message, { accountId, channelId, now = (
   const senderId = String(message.from_user_id ?? "").trim();
   if (!senderId) return null;
   const imageRefs = extractInboundImageRefs(message.item_list);
+  const fileRefs = extractInboundFileRefs(message.item_list);
   const inboundBody = inboundText(message.item_list);
-  const text = inboundBody || (imageRefs.length ? "[图片]" : "");
+  const placeholder = [imageRefs.length ? "[图片]" : "", fileRefs.length ? "[文件]" : ""].filter(Boolean).join(" ");
+  const text = inboundBody || placeholder;
   if (!text) return null;
   const createdAtMs = positiveNumber(message.create_time_ms) || positiveNumber(message.create_time) * 1000 || now().getTime();
   const messageId = String(message.message_id ?? message.client_id ?? "").trim();
@@ -612,6 +703,10 @@ export function normalizeInboundMessage(message, { accountId, channelId, now = (
     createdAtMs,
     textHash: sha256(text),
     imageCount: imageRefs.length,
+    ...(fileRefs.length ? {
+      fileCount: fileRefs.length,
+      fileIdentity: fileRefs.map((ref) => ({ fileName: ref.fileName, declaredSize: ref.declaredSize, declaredMd5: ref.declaredMd5 })),
+    } : {}),
   };
   const dedupKey = sha256(canonicalJson(dedupIdentity));
   return {
@@ -621,13 +716,22 @@ export function normalizeInboundMessage(message, { accountId, channelId, now = (
     conversationId,
     messageId,
     text,
-    messageType: imageRefs.length ? (inboundBody ? "mixed" : "image") : "text",
+    messageType: messageContentType({ inboundBody, imageRefs, fileRefs }),
     imageRefs,
+    fileRefs,
     contextToken: String(message.context_token ?? "").trim(),
     receivedAt: new Date(createdAtMs).toISOString(),
     dedupKey,
     eventId: `evt_wechat_${dedupKey.slice(0, 32)}`,
   };
+}
+
+function messageContentType({ inboundBody, imageRefs, fileRefs }) {
+  const kinds = Number(Boolean(inboundBody)) + Number(Boolean(imageRefs.length)) + Number(Boolean(fileRefs.length));
+  if (kinds > 1) return "mixed";
+  if (fileRefs.length) return "file";
+  if (imageRefs.length) return "image";
+  return "text";
 }
 
 function inboundText(itemList) {

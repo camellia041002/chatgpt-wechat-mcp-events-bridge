@@ -96,7 +96,7 @@ function normalizeState(value) {
     version: 1,
     subscriptions: Array.isArray(source.subscriptions) ? source.subscriptions : [],
     deliveries: Array.isArray(source.deliveries) ? source.deliveries : [],
-    inboundEvents: Array.isArray(source.inboundEvents) ? source.inboundEvents : [],
+    inboundEvents: Array.isArray(source.inboundEvents) ? source.inboundEvents.map(normalizeInboundEvent) : [],
     writeReceipts: Array.isArray(source.writeReceipts) ? source.writeReceipts : [],
     processedMessages: source.processedMessages && typeof source.processedMessages === "object" ? source.processedMessages : {},
     contextTokens: source.contextTokens && typeof source.contextTokens === "object" ? source.contextTokens : {},
@@ -106,6 +106,19 @@ function normalizeState(value) {
       authCodes: source.oauth?.authCodes && typeof source.oauth.authCodes === "object" ? source.oauth.authCodes : {},
       accessTokens: source.oauth?.accessTokens && typeof source.oauth.accessTokens === "object" ? source.oauth.accessTokens : {},
       refreshTokens: source.oauth?.refreshTokens && typeof source.oauth.refreshTokens === "object" ? source.oauth.refreshTokens : {},
+    },
+  };
+}
+
+function normalizeInboundEvent(event) {
+  if (!event || typeof event !== "object") return event;
+  const data = event.data && typeof event.data === "object" ? event.data : {};
+  return {
+    ...event,
+    data: {
+      ...data,
+      file_count: Number.isInteger(data.file_count) && data.file_count >= 0 ? data.file_count : 0,
+      file_error_count: Number.isInteger(data.file_error_count) && data.file_error_count >= 0 ? data.file_error_count : 0,
     },
   };
 }
