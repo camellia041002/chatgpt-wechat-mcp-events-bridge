@@ -29,6 +29,21 @@ idempotency_key = reply:<eventId>
 10. A normal message typed directly into the ChatGPT conversation must not call `send_wechat_reply`.
 11. Completing one event must not pause or delete the persistent task.
 
+## Customize the task prompt
+
+The invariants above are the transport contract, not a required personality prompt. After the event-triggered task is created, you can edit its saved instructions to choose the assistant's tone, reply length, initiative and tool-use style. Treat the first prompt as a safe baseline rather than text that must remain unchanged forever.
+
+Keep these two layers separate:
+
+- **Keep the operational layer:** event identity, attachment reads, untrusted-content handling, destination binding, one reply per event, the `reply:<eventId>` idempotency key, success verification and the rule that direct ChatGPT messages must not be sent to WeChat.
+- **Customize the behavioral layer:** voice, relationship context, how concise or expressive replies should be, when optional tools are worth using and any personal preferences that belong to your own conversation.
+
+Do not copy MCP tool schemas, plugin descriptions or long troubleshooting histories into the task prompt. The host supplies the connected tools and their schemas separately; repeating them makes the durable prompt harder to read and maintain. Add only the behavior or boundary that is specific to your task.
+
+If you deliberately extend your deployment with another trigger, such as a scheduled or system wake event, make the event distinction explicit. A wake event does not imply that the user just sent a new message. For this repository's default setup, `wechat.message.received` is the only trigger and does represent a new WeChat message.
+
+After editing the prompt, save it and reopen the task editor. Verify the saved text, trigger(s), selected model and reasoning setting, same-chat destination, and enabled status. Do not use a test WeChat message when a read-back check is sufficient.
+
 Supported files are PDF, DOCX, TXT, PPTX, XLSX, XLS, CSV, TSV, WAV, MP3/MPEG, OGG/OGA, FLAC, AAC and M4A. The bridge accepts at most four files per event and 25 MiB per file. TXT/CSV/TSV and OOXML text are extracted server-side with a 200,000-character cap. PDF, legacy XLS and audio retain the original MCP resource/audio content but report server-side text extraction as unavailable.
 
 ## Delivery ordering and acknowledgement
