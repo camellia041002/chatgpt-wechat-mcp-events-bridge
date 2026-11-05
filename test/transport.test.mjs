@@ -77,13 +77,13 @@ test("discovery exposes the real event and only bounded transport tools", async 
   const app = createMcpApp({ store: f.store, transport: f.transport });
   const events = await app.handleRpc("events/list", {}, { scopes: ["wechat:read"] });
   const tools = await app.handleRpc("tools/list", {}, { scopes: ["wechat:read"] });
-  assert.deepEqual(events.events.map((item) => item.name), ["wechat.message.received"]);
-  assert.deepEqual(tools.tools.map((item) => item.name), ["get_transport_status", "get_pending_wechat_messages", "get_wechat_image", "get_wechat_file", "send_wechat_reply"]);
-  assert.equal(tools.tools[1].annotations.readOnlyHint, true);
-  assert.equal(tools.tools[2].annotations.readOnlyHint, true);
-  assert.equal(tools.tools[3].annotations.readOnlyHint, true);
-  assert.equal(tools.tools[4].annotations.destructiveHint, true);
-  assert.equal(tools.tools[4].annotations.idempotentHint, true);
+  assert.deepEqual(events.events.map((item) => item.name), ["wechat.message.received", "wechat.delivery.recovery"]);
+  assert.deepEqual(tools.tools.map((item) => item.name), ["get_transport_status", "get_pending_wechat_messages", "get_delivery_diagnostics", "get_wechat_image", "get_wechat_file", "send_wechat_reply"]);
+  assert.equal(tools.tools.find((item) => item.name === "get_delivery_diagnostics").annotations.readOnlyHint, true);
+  assert.equal(tools.tools.find((item) => item.name === "get_wechat_image").annotations.readOnlyHint, true);
+  assert.equal(tools.tools.find((item) => item.name === "get_wechat_file").annotations.readOnlyHint, true);
+  assert.equal(tools.tools.find((item) => item.name === "send_wechat_reply").annotations.destructiveHint, true);
+  assert.equal(tools.tools.find((item) => item.name === "send_wechat_reply").annotations.idempotentHint, true);
 });
 
 test("iLink QR login uses the current POST contract and supports redirect verification", async () => {
@@ -251,6 +251,68 @@ test("missing write acknowledgement redelivers the same event with a stable webh
   assert.equal(deliveries[1].webhookId, event.eventId);
   await waitUntil(() => f.store.state.inboundEvents.find((item) => item.eventId === event.eventId)?.internal?.dispatch?.state === "acknowledged");
   assert.equal(f.store.state.writeReceipts.filter((item) => item.status === "succeeded").length, 1);
+});
+
+test("an exhausted reply emits one targeted independent recovery event", async (t) => {
+  const f = fixture({ eventAckTimeoutMs: 10, eventRetryDelaysMs: [0] });
+  t.after(f.cleanup);
+  const delivered = [];
+  f.transport.setEventHandler(async (event) => {
+    delivered.push(event);
+    return [{ accepted: true, status: 202 }];
+  });
+  const event = await f.transport.acceptRawMessage(inbound(), { accountId: "simulation-account" });
+  await waitUntil(() => f.store.state.inboundEvents[0]?.internal?.dispatch?.recovery?.state === "accepted");
+  const recovery = delivered.find((item) => item.name === "wechat.delivery.recovery");
+  assert.equal(recovery.data.source, "delivery-recovery");
+  assert.equal(recovery.data.target_event_id, event.eventId);
+  assert.equal(recovery.data.sender_id, "wx-user-1");
+  assert.equal(recovery.data.text, "你好");
+  assert.equal(recovery.data.diagnostic_code, "reply_ack_timeout");
+  const diagnostic = f.transport.deliveryDiagnostics({ eventId: event.eventId });
+  assert.equal(diagnostic.events[0].dispatch_state, "exhausted");
+  assert.equal(diagnostic.events[0].recovery.state, "accepted");
+  assert.equal(diagnostic.events[0].inferred_stage, "event_callback_accepted_but_no_write_tool_receipt");
+});
+
+test("creating the recovery subscription retries only feature-marked failed recovery events", async (t) => {
+  const f = fixture({ eventAckTimeoutMs: 10, eventRetryDelaysMs: [0] });
+  t.after(f.cleanup);
+  f.transport.setEventHandler(async (event) => (
+    event.name === "wechat.message.received" ? [{ accepted: true, status: 202 }] : []
+  ));
+  const event = await f.transport.acceptRawMessage(inbound(), { accountId: "simulation-account" });
+  await waitUntil(() => f.store.state.inboundEvents[0]?.internal?.dispatch?.recovery?.state === "failed");
+
+  const secret = `whsec_${Buffer.alloc(32, 6).toString("base64")}`;
+  const received = [];
+  const app = createMcpApp({
+    store: f.store,
+    transport: f.transport,
+    recoveryResumeDelayMs: 0,
+    retryDelaysMs: [0],
+    resolveHost: async () => [{ address: "8.8.8.8", family: 4 }],
+    fetchFn: async (_url, options) => {
+      const headers = Object.fromEntries(Object.entries(options.headers).map(([key, item]) => [key.toLowerCase(), item]));
+      const parsed = new Webhook(secret).verify(options.body, headers);
+      if (parsed.type === "verification") return new Response(JSON.stringify({ challenge: parsed.challenge }), { status: 200 });
+      received.push(parsed);
+      return new Response("", { status: 202 });
+    },
+  });
+  f.transport.setEventHandler(app.deliverEvent);
+  await app.handleRpc("events/subscribe", {
+    name: "wechat.delivery.recovery",
+    arguments: { channel_id: "wechat" },
+    delivery: { mode: "webhook", url: "https://events.example.test/recovery", secret },
+  }, { principal: "owner", scopes: ["wechat:read"] });
+
+  await waitUntil(() => received.length === 1);
+  assert.equal(received[0].name, "wechat.delivery.recovery");
+  assert.equal(received[0].data.target_event_id, event.eventId);
+  assert.equal(f.store.state.inboundEvents[0].internal.dispatch.recovery.state, "accepted");
+  assert.equal(f.store.state.inboundEvents[0].internal.dispatch.recovery.attempts, 2);
+  assert.deepEqual(f.store.state.subscriptions.map((item) => item.name), ["wechat.delivery.recovery"]);
 });
 
 test("event payload exposes the stable event id inside data", async (t) => {
@@ -575,7 +637,7 @@ test("OAuth DCR, explicit consent, PKCE, token exchange, and authenticated MCP c
     method: "POST", headers: { "Content-Type": "application/json", Authorization: `Bearer ${token.access_token}` },
     body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list", params: {} }),
   })).json();
-  assert.deepEqual(rpc.result.tools.map((item) => item.name), ["get_transport_status", "get_pending_wechat_messages", "get_wechat_image", "get_wechat_file", "send_wechat_reply"]);
+  assert.deepEqual(rpc.result.tools.map((item) => item.name), ["get_transport_status", "get_pending_wechat_messages", "get_delivery_diagnostics", "get_wechat_image", "get_wechat_file", "send_wechat_reply"]);
   const reopened = new StateStore({ stateDir: f.stateDir });
   assert.equal(Object.keys(reopened.state.oauth.accessTokens).length, 1);
 });
@@ -625,7 +687,7 @@ test("an App-backed legacy MCP path can authorize against the same isolated tran
     method: "POST", headers: { "Content-Type": "application/json", Authorization: `Bearer ${token.access_token}` },
     body: JSON.stringify({ jsonrpc: "2.0", id: 2, method: "events/list", params: {} }),
   })).json();
-  assert.deepEqual(rpc.result.events.map((item) => item.name), ["wechat.message.received"]);
+  assert.deepEqual(rpc.result.events.map((item) => item.name), ["wechat.message.received", "wechat.delivery.recovery"]);
 });
 
 test("simulation injection is available only through the direct loopback admin route", async (t) => {

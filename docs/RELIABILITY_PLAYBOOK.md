@@ -13,7 +13,7 @@ These rules capture failure modes that are easy to reproduce when connecting MCP
 
 - `TRANSPORT_EVENT_RETRY_DELAYS_MS` controls managed event delivery attempts. The default `0,5000,15000` keeps bounded retries for transient callback failures.
 - If the event host accepts callbacks but a long-running conversation regularly takes longer than the acknowledgement timeout to call the reply tool, repeated delivery can add duplicate work to the same queue. In that environment, set `TRANSPORT_EVENT_RETRY_DELAYS_MS=0` to make one delivery attempt, and choose an acknowledgement timeout that covers the expected run time.
-- Single delivery trades duplicate-work pressure for less automatic recovery from a genuinely lost callback. Keep the delivery watchdog and operational monitoring enabled, and verify callback acceptance, write receipt, and client receipt as separate stages.
+- Single delivery trades duplicate-work pressure for less automatic recovery from a genuinely lost callback. Keep the independent recovery subscription and operational monitoring enabled, and verify callback acceptance, write receipt, and client receipt as separate stages.
 - This setting reduces one source of queue amplification. It does not guarantee platform latency or prevent work already queued by the event host from competing with a new message.
 
 ## Separate content from operations
@@ -21,6 +21,14 @@ These rules capture failure modes that are easy to reproduce when connecting MCP
 - User content may wake the conversational task.
 - Outage, recovery, and health notifications should be sent through a backend-owned, authenticated, idempotent notification path.
 - Operational alerts must not be converted into user content or injected into the agent's conversation merely to obtain delivery.
+
+## Use a separate, exact-target recovery task
+
+- Subscribe a different conversation to `wechat.delivery.recovery`; do not attach recovery to the conversation whose queue may already be stalled.
+- Every recovery event names exactly one `target_event_id`. Check diagnostics first and reuse `reply:<target_event_id>`.
+- Never scan or replay the whole pending queue from a recovery run.
+- During cutover, create and verify the recovery subscription before relying on it. Late subscription creation retries only feature-marked failed recovery deliveries.
+- Choose the acknowledgement timeout from observed normal latency. A shorter value improves recovery time but may start overlapping work; the original reply idempotency key is therefore mandatory.
 
 ## Cut over conversations fail-closed
 

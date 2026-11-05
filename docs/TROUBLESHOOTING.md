@@ -57,7 +57,7 @@ iLink 把普通文件放在 `item_list[].type=4` 的 `file_item` 中。只解析
 - 同一个逻辑事件的 `webhook-id`、正文 `eventId` 和 `data.event_id` 必须保持一致；
 - 每次运行继续使用同一个 `reply:<eventId>`，不得换事件 ID 绕过去重；
 - 把“callback 没到”与“callback 到了但没有 write receipt”分开处理；
-- 如果环境中已接受的运行经常超过 acknowledgement timeout，可把投递次数降为一次，并让 acknowledgement timeout 覆盖正常运行时间；同时保留独立的 watchdog；
+- 如果环境中已接受的运行经常超过 acknowledgement timeout，可把投递次数降为一次，并让 acknowledgement timeout 覆盖绝大多数正常运行时间；同时把 `wechat.delivery.recovery` 放在独立会话中，不要与主任务共用同一条可能卡住的队列；
 - 调整重试次数只能减少排队放大，不能保证平台执行延迟消失。
 
 ### 收件提示不是回复成功
@@ -69,7 +69,7 @@ iLink 把普通文件放在 `item_list[].type=4` 的 `file_item` 中。只解析
 - 不确认、删除或清空原 pending 事件；
 - 每轮卡顿最多提示一次，重启后不追发历史提示；
 - 真正回复仍使用原事件绑定的回复工具和幂等键；
-- watchdog 只能在有证据表明原消息仍待处理时进行独立、幂等的恢复，不能伪造原 write receipt。
+- 独立恢复任务只能在诊断仍表明原消息未成功写回时处理精确的 `target_event_id`，不能伪造原 write receipt，也不能顺手重放其他 pending。
 
 排障时应同时查看任务运行记录和 transport 的脱敏状态。如果 callback 已接受、任务运行长时间没有工具调用，而 transport、tunnel 和订阅都健康，应把证据保留为平台执行延迟，而不是继续在服务器侧重复部署。
 

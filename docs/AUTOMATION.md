@@ -1,6 +1,6 @@
 # ChatGPT Work automation
 
-Create exactly one event-triggered task for:
+Create one primary event-triggered task for:
 
 ```text
 event = wechat.message.received
@@ -29,6 +29,15 @@ idempotency_key = reply:<eventId>
 10. A normal message typed directly into the ChatGPT conversation must not call `send_wechat_reply`.
 11. Completing one event must not pause or delete the persistent task.
 
+Create a second, independent recovery task for:
+
+```text
+event = wechat.delivery.recovery
+channel_id = wechat
+```
+
+The recovery task must inspect only `payload.target_event_id`. First call `get_delivery_diagnostics`; if that target already has a successful reply receipt, finish without sending. Otherwise, handle only the bounded payload for that target and call `send_wechat_reply` with the original sender, original event ID, and `reply:<target_event_id>`. Never list or replay unrelated pending messages. Keep this task in a separate conversation so a stalled primary conversation cannot also stall its fallback.
+
 ## Customize the task prompt
 
 The invariants above are the transport contract, not a required personality prompt. After the event-triggered task is created, you can edit its saved instructions to choose the assistant's tone, reply length, initiative and tool-use style. Treat the first prompt as a safe baseline rather than text that must remain unchanged forever.
@@ -54,12 +63,12 @@ If no write-tool receipt appears before the bounded acknowledgement timeout, the
 
 Before recording a failed write receipt, the reply path retries transient iLink/network failures a bounded number of times. Every attempt reuses the same per-chunk client ID and run ID so a lost response does not create a new logical message. Missing context, explicit iLink prepare rejection, and definite HTTP 4xx errors fail closed without blind retries.
 
-Keep content events separate from operational alerts. A bridge outage, recovery attempt, or delivery-health warning should use an authenticated backend notification path and its own idempotency key; it should not be disguised as user content or wake the conversational agent merely so the agent can forward an infrastructure message.
+Keep content events separate from operational alerts. `wechat.delivery.recovery` is a bounded recovery signal, not a new user message: it targets one original event and reuses that event's reply idempotency key. Bridge outages and delivery-health warnings still belong on an authenticated backend notification path and must not be disguised as user content.
 
 Historical pending events without dispatcher metadata are excluded from automatic replay. They still require an explicit recovery decision.
 
 ## Changing the ChatGPT conversation
 
-Keep the transport and account state unchanged. Move only the automation/context and its MCP Event subscription. Ensure there is exactly one active subscription after cutover.
+Keep the transport and account state unchanged. Move only the automation/context and its MCP Event subscription. Ensure there is exactly one active primary subscription and one active recovery subscription after cutover.
 
-A `1 -> 0 -> 1` subscription transition avoids two long-lived subscribers, but does not guarantee zero loss during the gap. Check pending messages afterward; this implementation does not replay old pending events merely because a new subscription was created.
+A `1 -> 0 -> 1` subscription transition avoids two long-lived subscribers, but does not guarantee zero loss during the gap. Check pending messages afterward. Creating the recovery subscription retries only recovery events already marked for this feature; it never replays unrelated legacy pending messages.

@@ -13,6 +13,7 @@ import {
 } from "./file-store.mjs";
 
 const EVENT_NAME = "wechat.message.received";
+const DELIVERY_RECOVERY_EVENT_NAME = "wechat.delivery.recovery";
 const MAX_REPLY_CHARS = 24_000;
 const MAX_WEIXIN_CHUNK = 3_800;
 const WEIXIN_MAX_DELIVERY_MESSAGES = 9;
@@ -61,6 +62,7 @@ export class WeChatTransport {
     this.writeRetryDelaysMs = normalizeRetryDelays(writeRetryDelaysMs).slice(0, 3);
     this.inFlightWrites = new Map();
     this.eventDispatchPromise = null;
+    this.recoveryDispatchPromise = null;
     this.inboundIngestPromise = Promise.resolve();
   }
 
@@ -73,6 +75,7 @@ export class WeChatTransport {
       accountConfigured: Boolean(this.accountId && this.store.getAccount(this.accountId)),
       channelId: this.channelId,
       eventName: EVENT_NAME,
+      deliveryRecoveryEventName: DELIVERY_RECOVERY_EVENT_NAME,
       subscriptions: state.subscriptions.length,
       inboundEventCount: state.inboundEvents.length,
       pendingMessageCount: this.pendingMessages({ limit: 10_000 }).count,
@@ -80,6 +83,7 @@ export class WeChatTransport {
       serialEventDispatchEnabled: this.serialEventDispatchEnabled,
       managedEventQueueDepth: state.inboundEvents.filter((event) => isManagedUnacknowledged(event, state.writeReceipts)).length,
       managedEventStalledCount: state.inboundEvents.filter((event) => ["failed", "exhausted", "unroutable"].includes(event.internal?.dispatch?.state)).length,
+      pendingRecoveryCount: state.inboundEvents.filter((event) => ["pending", "delivering", "failed"].includes(event.internal?.dispatch?.recovery?.state)).length,
       latestInboundEvent: redactInbound(state.inboundEvents.at(-1)),
       latestWrite: redactReceipt(state.writeReceipts.at(-1)),
     };
@@ -105,6 +109,32 @@ export class WeChatTransport {
   resumeEventDispatch() {
     if (!this.serialEventDispatchEnabled) return false;
     this.#ensureEventDispatcher();
+    this.resumeRecoveryDispatch();
+    return true;
+  }
+
+  resumeRecoveryDispatch() {
+    if (!this.serialEventDispatchEnabled) return false;
+    let changed = false;
+    for (const event of this.store.state.inboundEvents) {
+      const recovery = event.internal?.dispatch?.recovery;
+      if (!recovery) continue;
+      if (hasSucceededWrite(this.store.state.writeReceipts, event.eventId)) {
+        if (recovery.state !== "accepted" && recovery.state !== "suppressed_succeeded") {
+          recovery.state = "suppressed_succeeded";
+          recovery.finishedAt = this.now().toISOString();
+          changed = true;
+        }
+        continue;
+      }
+      if (recovery.state === "failed") {
+        recovery.state = "pending";
+        recovery.retryRequestedAt = this.now().toISOString();
+        changed = true;
+      }
+    }
+    if (changed) this.store.save();
+    this.#ensureRecoveryDispatcher();
     return true;
   }
 
@@ -288,6 +318,61 @@ export class WeChatTransport {
         receivedAt: event.data.received_at,
       })),
     };
+  }
+
+  deliveryDiagnostics({ eventId = "", limit = 5 } = {}) {
+    const normalizedEventId = String(eventId || "").trim();
+    const boundedLimit = Math.min(Math.max(Number.parseInt(limit, 10) || 5, 1), 10);
+    const selected = normalizedEventId
+      ? this.store.state.inboundEvents.filter((event) => event.eventId === normalizedEventId)
+      : this.store.state.inboundEvents.slice(-boundedLimit).reverse();
+    if (normalizedEventId && selected.length === 0) throw new Error("event_id is not a known inbound WeChat event");
+    return {
+      channel_id: this.channelId,
+      event_count: selected.length,
+      events: selected.map((event) => diagnosticRecord(event, this.store.state.deliveries, this.store.state.writeReceipts, this.now())),
+    };
+  }
+
+  async emitDeliveryRecovery({ targetEvent, diagnosticCode = "" } = {}) {
+    const target = targetEvent?.eventId
+      ? targetEvent
+      : this.store.state.inboundEvents.find((item) => item.eventId === String(targetEvent || ""));
+    if (!target?.eventId
+      || target.data?.channel_id !== this.channelId
+      || (this.accountId && String(target.internal?.accountId || "") !== String(this.accountId))) {
+      throw new Error("Recovery target does not belong to the current bound WeChat account");
+    }
+    const eventId = `evt_wechat_recovery_${sha256(canonicalJson({ channelId: this.channelId, targetEventId: target.eventId })).slice(0, 32)}`;
+    const timestamp = this.now().toISOString();
+    const event = {
+      eventId,
+      name: DELIVERY_RECOVERY_EVENT_NAME,
+      timestamp,
+      data: {
+        event_id: eventId,
+        channel_id: this.channelId,
+        source: "delivery-recovery",
+        target_event_id: target.eventId,
+        sender_id: target.data.sender_id,
+        conversation_id: target.data.conversation_id,
+        text: target.data.text,
+        message_type: target.data.message_type || "text",
+        image_count: Number(target.data.image_count) || 0,
+        image_error_count: Number(target.data.image_error_count) || 0,
+        file_count: Number(target.data.file_count) || 0,
+        file_error_count: Number(target.data.file_error_count) || 0,
+        received_at: target.data.received_at,
+        diagnostic_code: String(diagnosticCode || "reply_pipeline_exhausted").trim().slice(0, 120),
+        created_at: timestamp,
+      },
+      cursor: null,
+    };
+    const deliveries = await this.onEvent(publicEvent(event));
+    if (Array.isArray(deliveries) && !deliveries.some((item) => item?.accepted === true)) {
+      throw new Error("Delivery recovery event was not accepted by an active subscription");
+    }
+    return publicEvent(event);
   }
 
   async getImage({ eventId, imageIndex = 0 }) {
@@ -501,6 +586,7 @@ export class WeChatTransport {
         event.internal.dispatch.lastError = String(error?.name || "dispatcher_error");
         event.internal.dispatch.exhaustedAt = this.now().toISOString();
         this.store.save();
+        this.#queueDeliveryRecovery(event, "dispatcher_error");
       })
       .finally(() => {
         this.eventDispatchPromise = null;
@@ -538,6 +624,7 @@ export class WeChatTransport {
       dispatch.state = "failed";
       dispatch.failedAt = existingReceipt.failedAt || this.now().toISOString();
       this.store.save();
+      this.#queueDeliveryRecovery(event, existingReceipt.errorCode || "write_failed");
       return;
     }
 
@@ -560,6 +647,7 @@ export class WeChatTransport {
         dispatch.state = "failed";
         dispatch.failedAt = beforeAttempt.failedAt || this.now().toISOString();
         this.store.save();
+        this.#queueDeliveryRecovery(event, beforeAttempt.errorCode || "write_failed");
         return;
       }
 
@@ -608,6 +696,8 @@ export class WeChatTransport {
         dispatch.state = "failed";
         dispatch.failedAt = this.now().toISOString();
         this.store.save();
+        const failedReceipt = latestWriteReceipt(this.store.state.writeReceipts, event.eventId);
+        this.#queueDeliveryRecovery(event, failedReceipt?.errorCode || "write_failed");
         return;
       }
       dispatch.state = "timed_out";
@@ -618,6 +708,59 @@ export class WeChatTransport {
     dispatch.state = "exhausted";
     dispatch.exhaustedAt = this.now().toISOString();
     this.store.save();
+    this.#queueDeliveryRecovery(event, dispatch.lastError || "reply_pipeline_exhausted");
+  }
+
+  #queueDeliveryRecovery(event, diagnosticCode) {
+    const dispatch = event?.internal?.dispatch;
+    if (!dispatch || dispatch.recovery?.state === "accepted") return;
+    if (hasSucceededWrite(this.store.state.writeReceipts, event.eventId)) return;
+    dispatch.recovery ||= {
+      state: "pending",
+      attempts: 0,
+      queuedAt: this.now().toISOString(),
+    };
+    dispatch.recovery.diagnosticCode = String(diagnosticCode || "reply_pipeline_exhausted").slice(0, 120);
+    if (dispatch.recovery.state !== "delivering") dispatch.recovery.state = "pending";
+    this.store.save();
+    this.#ensureRecoveryDispatcher();
+  }
+
+  #ensureRecoveryDispatcher() {
+    if (this.recoveryDispatchPromise || !this.serialEventDispatchEnabled) return this.recoveryDispatchPromise;
+    this.recoveryDispatchPromise = this.#runRecoveryDispatcher()
+      .finally(() => { this.recoveryDispatchPromise = null; });
+    return this.recoveryDispatchPromise;
+  }
+
+  async #runRecoveryDispatcher() {
+    while (true) {
+      const event = this.store.state.inboundEvents.find((item) => (
+        item.internal?.dispatch?.recovery?.state === "pending"
+        && !hasSucceededWrite(this.store.state.writeReceipts, item.eventId)
+      ));
+      if (!event) return;
+      const recovery = event.internal.dispatch.recovery;
+      recovery.state = "delivering";
+      recovery.attempts = (Number(recovery.attempts) || 0) + 1;
+      recovery.lastAttemptAt = this.now().toISOString();
+      this.store.save();
+      try {
+        const emitted = await this.emitDeliveryRecovery({
+          targetEvent: event,
+          diagnosticCode: recovery.diagnosticCode,
+        });
+        recovery.state = "accepted";
+        recovery.eventId = emitted.eventId;
+        recovery.acceptedAt = this.now().toISOString();
+        recovery.errorCode = "";
+      } catch (error) {
+        recovery.state = "failed";
+        recovery.errorCode = String(error?.name || "recovery_delivery_error").slice(0, 120);
+        recovery.failedAt = this.now().toISOString();
+      }
+      this.store.save();
+    }
   }
 
   async #waitForWriteOutcome(eventId) {
@@ -660,6 +803,53 @@ function hasSucceededWrite(receipts, eventId) {
 
 function latestWriteReceipt(receipts, eventId) {
   return [...receipts].reverse().find((item) => item.eventId === eventId) || null;
+}
+
+function diagnosticRecord(event, deliveries, receipts, now) {
+  const dispatch = event.internal?.dispatch || {};
+  const receipt = latestWriteReceipt(receipts, event.eventId);
+  const delivery = [...deliveries].reverse().find((item) => item.eventId === event.eventId) || null;
+  const receivedAt = event.data?.received_at || event.timestamp || "";
+  const receivedMs = Date.parse(receivedAt);
+  return {
+    event_id: event.eventId,
+    received_at: receivedAt,
+    age_seconds: Number.isFinite(receivedMs) ? Math.max(0, Math.floor((now.getTime() - receivedMs) / 1_000)) : null,
+    dispatch_state: String(dispatch.state || "legacy_unmanaged"),
+    dispatch_attempts: Number(dispatch.attempts) || 0,
+    last_attempt_at: String(dispatch.lastAttemptAt || ""),
+    callback_accepted_at: String(dispatch.acceptedAt || ""),
+    last_error: String(dispatch.lastError || ""),
+    recovery: dispatch.recovery ? {
+      state: String(dispatch.recovery.state || ""),
+      event_id: String(dispatch.recovery.eventId || ""),
+      attempts: Number(dispatch.recovery.attempts) || 0,
+      error_code: String(dispatch.recovery.errorCode || ""),
+    } : { state: "not_emitted" },
+    latest_webhook_delivery: delivery ? {
+      accepted: Boolean(delivery.accepted),
+      http_status: Number(delivery.status) || 0,
+      error_code: String(delivery.errorCode || ""),
+      attempted_at: String(delivery.attemptedAt || ""),
+    } : null,
+    write_receipt: receipt ? {
+      status: String(receipt.status || ""),
+      error_code: String(receipt.errorCode || ""),
+      completed_at: String(receipt.completedAt || ""),
+      failed_at: String(receipt.failedAt || ""),
+    } : null,
+    inferred_stage: diagnosticStage(dispatch, delivery, receipt),
+  };
+}
+
+function diagnosticStage(dispatch, delivery, receipt) {
+  if (receipt?.status === "succeeded") return "wechat_write_succeeded";
+  if (receipt?.status === "failed") return `write_tool_reached_transport_and_failed${receipt.errorCode ? `:${receipt.errorCode}` : ""}`;
+  if (dispatch?.state === "unroutable") return "no_matching_event_subscription";
+  if (delivery?.accepted || dispatch?.acceptedAt) return "event_callback_accepted_but_no_write_tool_receipt";
+  if (dispatch?.lastError) return `event_callback_failed:${dispatch.lastError}`;
+  if (dispatch?.state === "queued") return "waiting_for_event_delivery";
+  return "no_write_tool_receipt";
 }
 
 function isManagedUnacknowledged(event, receipts) {
@@ -1019,6 +1209,7 @@ function isRetryableSendError(error) {
 
 export {
   EVENT_NAME,
+  DELIVERY_RECOVERY_EVENT_NAME,
   MAX_WEIXIN_CHUNK,
   WEIXIN_MAX_DELIVERY_MESSAGES,
   chunkReplyText,

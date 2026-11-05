@@ -19,6 +19,7 @@
    ├─ Standard Webhooks 签名投递
    ├─ 写回确认门控的串行事件队列
    ├─ pending 队列与受控重投
+   ├─ 精确绑定原事件的独立恢复事件
    └─ 事件绑定、幂等的回复工具
    │
    ▼
@@ -50,7 +51,9 @@ transport 本身不运行语言模型，也不接管 ChatGPT 的上下文或记�
 ## 主要能力
 
 - `wechat.message.received` MCP Event，支持文本、语音转写、图片和常见文件，并可按 `channel_id` 和发送者过滤。
+- `wechat.delivery.recovery` MCP Event：主任务在确认期限内没有成功写回时，只把原事件 ID 和必要的有界消息元数据交给独立恢复任务。
 - `get_transport_status`：只读、脱敏的健康状态和计数。
+- `get_delivery_diagnostics`：按事件 ID 区分 callback 未到、callback 已接受但没有写回回执，以及写回已成功/失败。
 - `get_pending_wechat_messages`：读取最早的未成功回复事件，不返回 iLink `context_token`。
 - `get_wechat_image`：按事件 ID 与零起始索引读取一张已校验图片，以 MCP image content block 返回。
 - `get_wechat_file`：按事件 ID 与零起始索引读取一个已校验文件，返回原始 MCP resource、可用的提取文字，并为音频附加 audio content block。
@@ -81,7 +84,7 @@ npm install
 npm run check
 ```
 
-当前回归集包含 48 项测试，覆盖图片/文件读取、OOXML 类型与富文本提取校验、ZIP 防护、音频容器校验、配额清理与并发写入、升级前去重键与历史事件兼容、串行确认门控、可配置事件重投、回执超时重投、历史 pending 隔离与幂等写回。
+当前回归集包含 50 项测试，覆盖图片/文件读取、OOXML 类型与富文本提取校验、ZIP 防护、音频容器校验、配额清理与并发写入、升级前去重键与历史事件兼容、串行确认门控、可配置事件重投、独立定向恢复、恢复订阅切换与幂等写回。
 
 启动默认关闭真实网络访问的模拟服务：
 
